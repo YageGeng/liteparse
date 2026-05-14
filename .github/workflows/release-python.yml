@@ -98,11 +98,11 @@ jobs:
           working-directory: packages/python
           before-script-linux: |
             if command -v yum &> /dev/null; then
-              yum install -y python3-devel clang-devel tesseract-devel leptonica-devel || true
+              yum install -y clang-devel tesseract-devel leptonica-devel || true
             elif command -v apt-get &> /dev/null; then
-              apt-get update && apt-get install -y python3-dev libclang-dev libtesseract-dev libleptonica-dev || true
+              apt-get update && apt-get install -y libclang-dev libtesseract-dev libleptonica-dev || true
             elif command -v apk &> /dev/null; then
-              apk add python3-dev clang-dev tesseract-ocr-dev leptonica-dev || true
+              apk add clang-dev tesseract-ocr-dev leptonica-dev || true
             fi
 
       - name: Copy pdfium dylib into wheel (Unix)
