@@ -45,11 +45,6 @@ jobs:
             node-arch: darwin-arm64
             pdfium-dylib: libpdfium.dylib
 
-          - os: macos-13
-            target: x86_64-apple-darwin
-            node-arch: darwin-x64
-            pdfium-dylib: libpdfium.dylib
-
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             node-arch: linux-x64-gnu
@@ -156,8 +151,6 @@ jobs:
         include:
           - os: macos-latest
             node-arch: darwin-arm64
-          - os: macos-13
-            node-arch: darwin-x64
           - os: ubuntu-latest
             node-arch: linux-x64-gnu
           - os: windows-latest
@@ -209,9 +202,6 @@ jobs:
             os: ubuntu-latest
             artifact: lit-linux-arm64
             use-cross: true
-          - target: x86_64-apple-darwin
-            os: macos-13
-            artifact: lit-darwin-x64
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: lit-darwin-arm64
@@ -309,7 +299,6 @@ jobs:
         run: |
           declare -A PLATFORMS=(
             ["darwin-arm64"]="aarch64-apple-darwin"
-            ["darwin-x64"]="x86_64-apple-darwin"
             ["linux-x64-gnu"]="x86_64-unknown-linux-gnu"
             ["linux-arm64-gnu"]="aarch64-unknown-linux-gnu"
             ["win32-x64-msvc"]="x86_64-pc-windows-msvc"
@@ -334,7 +323,6 @@ jobs:
 
             case "$ARCH" in
               darwin-arm64)  OS="darwin"; CPU="arm64" ;;
-              darwin-x64)    OS="darwin"; CPU="x64" ;;
               linux-x64-gnu) OS="linux";  CPU="x64" ;;
               linux-arm64-gnu) OS="linux"; CPU="arm64" ;;
               win32-x64-msvc) OS="win32"; CPU="x64" ;;

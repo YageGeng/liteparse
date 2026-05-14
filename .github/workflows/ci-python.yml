@@ -27,9 +27,6 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
 
-          - os: macos-13
-            target: x86_64-apple-darwin
-
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
 
@@ -76,17 +73,25 @@ jobs:
           working-directory: packages/python
           before-script-linux: |
             if command -v yum &> /dev/null; then
-              yum install -y clang-devel tesseract-devel leptonica-devel openssl-devel pkgconfig perl-IPC-Cmd || true
+              yum install -y clang-devel tesseract-devel leptonica-devel openssl-devel pkgconfig perl-IPC-Cmd glibc-devel || true
             elif command -v apt-get &> /dev/null; then
-              apt-get update && apt-get install -y libclang-dev libtesseract-dev libleptonica-dev libssl-dev pkg-config || true
+              apt-get update && apt-get install -y libclang-dev libtesseract-dev libleptonica-dev libssl-dev pkg-config libc6-dev || true
             elif command -v apk &> /dev/null; then
-              apk add clang-dev tesseract-ocr-dev leptonica-dev openssl-dev pkgconf || true
+              apk add clang-dev tesseract-ocr-dev leptonica-dev openssl-dev pkgconf musl-dev || true
             fi
 
       - name: Copy pdfium dylib into wheel (Unix)
         if: runner.os != 'Windows'
         working-directory: packages/python
         run: |
+          # Find pdfium in target/ (mounted from Docker) or cache
+          PDFIUM_LIB=$(find ../../target -name "libpdfium.so" -type f 2>/dev/null | head -1 || true)
+          if [ -z "$PDFIUM_LIB" ]; then
+            PDFIUM_LIB=$(find ~/.cache/pdfium-rs -name "libpdfium.so" -type f 2>/dev/null | head -1 || true)
+          fi
+          if [ -n "$PDFIUM_LIB" ]; then
+            export PDFIUM_LIB_PATH="$(dirname "$PDFIUM_LIB")"
+          fi
           bash scripts/copy-pdfium.sh
           for whl in dist/*.whl; do
             python -c "
@@ -172,8 +177,6 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - os: windows-latest

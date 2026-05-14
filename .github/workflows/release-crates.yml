@@ -75,9 +75,6 @@ jobs:
             os: ubuntu-latest
             artifact: lit-linux-arm64
             use-cross: true
-          - target: x86_64-apple-darwin
-            os: macos-13
-            artifact: lit-darwin-x64
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: lit-darwin-arm64
