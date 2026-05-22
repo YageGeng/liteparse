@@ -382,22 +382,31 @@ pub async fn convert_office_document(
 
     execute_command(&libre_office_cmd, args, 120_000).await?;
 
-    let base_name = Path::new(file_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| LiteParseError::Conversion(format!("invalid file path: {file_path}")))?;
-    let pdf_path = Path::new(output_dir)
-        .join(format!("{base_name}.pdf"))
-        .to_string_lossy()
-        .to_string();
-
-    if tokio::fs::metadata(&pdf_path).await.is_ok() {
-        Ok(pdf_path)
-    } else {
-        Err(LiteParseError::Conversion(
-            "LibreOffice conversion succeeded but output PDF not found".into(),
-        ))
+    // LibreOffice may sanitise the input filename (e.g. strip parentheses, leading
+    // digits, spaces) so the expected `<file_stem>.pdf` may not match what was
+    // actually produced.  Since `output_dir` is always a fresh temp directory that
+    // contains exactly one file after a successful conversion, scanning it for any
+    // `.pdf` entry is the most robust approach.
+    let mut read_dir = tokio::fs::read_dir(output_dir)
+        .await
+        .map_err(|e| LiteParseError::Conversion(format!("cannot read output dir: {e}")))?;
+    while let Some(entry) = read_dir
+        .next_entry()
+        .await
+        .map_err(|e| LiteParseError::Conversion(format!("error reading output dir: {e}")))?
+    {
+        let path = entry.path();
+        if path
+            .extension()
+            .map(|e| e.eq_ignore_ascii_case("pdf"))
+            .unwrap_or(false)
+        {
+            return Ok(path.to_string_lossy().to_string());
+        }
     }
+    Err(LiteParseError::Conversion(
+        "LibreOffice conversion succeeded but output PDF not found".into(),
+    ))
 }
 
 /// Convert images to PDF using ImageMagick.
