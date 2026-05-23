@@ -37,6 +37,16 @@ pub struct ConversionResult {
     pub original_extension: String,
 }
 
+/// Temp directories created during buffer-to-PDF conversion. Retained until
+/// dropped so staging and output dirs are removed on both success and failure.
+#[derive(Debug)]
+pub struct BufferConversionTemps {
+    #[allow(dead_code)]
+    staging: TempDir,
+    #[allow(dead_code)]
+    output: Option<TempDir>,
+}
+
 enum ConversionTool {
     LibreOffice,
     ImageMagick,
@@ -84,7 +94,6 @@ pub fn is_supported_extension(path: &str) -> bool {
 pub async fn convert_to_pdf(
     path: &str,
     password: Option<&str>,
-    is_temporary_path: bool,
 ) -> Result<(ConversionResult, Option<TempDir>), LiteParseError> {
     let ext = Path::new(path)
         .extension()
@@ -125,10 +134,6 @@ pub async fn convert_to_pdf(
             convert_office_document(path, tmp_dir.path().to_str().unwrap(), password).await?
         }
     };
-    // Remove temporary path for Office docs/images bytes
-    if is_temporary_path {
-        tokio::fs::remove_dir_all(Path::new(path).parent().unwrap()).await?;
-    }
 
     Ok((
         ConversionResult {
@@ -482,14 +487,24 @@ pub fn guess_extension_from_data(data: &[u8]) -> Option<String> {
 pub async fn convert_data_to_pdf(
     data: Vec<u8>,
     password: Option<&str>,
-) -> Result<(ConversionResult, Option<TempDir>), LiteParseError> {
+) -> Result<(ConversionResult, BufferConversionTemps), LiteParseError> {
     let ext = guess_extension_from_data(&data);
-    let tmp_dir = tempfile::Builder::new().prefix("liteparse-").tempdir()?;
-    let tmp_path = tmp_dir
-        .keep()
+    let staging_dir = tempfile::Builder::new()
+        .prefix("liteparse-staging-")
+        .tempdir()?;
+    let tmp_path = staging_dir
+        .path()
         .join(format!("input.{}", ext.unwrap_or("bin".to_string())));
     tokio::fs::write(&tmp_path, data).await?;
-    convert_to_pdf(tmp_path.to_str().unwrap(), password, true).await
+    let (converted, output_dir) =
+        convert_to_pdf(tmp_path.to_str().unwrap(), password).await?;
+    Ok((
+        converted,
+        BufferConversionTemps {
+            staging: staging_dir,
+            output: output_dir,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -596,15 +611,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_convert_to_pdf_passthrough_pdf() {
-        let (res, _) = convert_to_pdf("/some/file.pdf", None, false).await.unwrap();
+        let (res, _) = convert_to_pdf("/some/file.pdf", None).await.unwrap();
         assert_eq!(res.pdf_path, "/some/file.pdf");
         assert_eq!(res.original_extension, "pdf");
     }
 
     #[tokio::test]
     async fn test_convert_to_pdf_unsupported() {
-        let r = convert_to_pdf("/some/file.xyz", None, false).await;
+        let r = convert_to_pdf("/some/file.xyz", None).await;
         assert!(r.is_err());
         assert!(r.unwrap_err().to_string().contains("unsupported"));
+    }
+
+    #[tokio::test]
+    async fn test_convert_data_to_pdf_cleans_staging_on_failure() {
+        let test_tmp = tempfile::tempdir().expect("test temp dir");
+        // SAFETY: single-threaded test; restored after scope
+        unsafe {
+            std::env::set_var("TMPDIR", test_tmp.path());
+            std::env::set_var("TEMP", test_tmp.path());
+            std::env::set_var("TMP", test_tmp.path());
+        }
+
+        let data = vec![0u8, 1, 2, 3];
+        let err = convert_data_to_pdf(data, None).await.unwrap_err();
+        assert!(err.to_string().contains("unsupported"));
+
+        let remaining: Vec<_> = std::fs::read_dir(test_tmp.path())
+            .expect("read test temp dir")
+            .collect();
+        assert!(
+            remaining.is_empty(),
+            "staging temp dir should be removed when conversion fails"
+        );
     }
 }
