@@ -90,8 +90,7 @@ impl LiteParse {
                         PdfInput::Path(p)
                     } else {
                         let (converted, tmp_dir) =
-                            conversion::convert_to_pdf(&p, self.config.password.as_deref())
-                                .await?;
+                            conversion::convert_to_pdf(&p, self.config.password.as_deref()).await?;
                         _conv_tmp_dir = tmp_dir;
                         // The on-disk source isn't ours to delete; only the
                         // converted temp file should be cleaned up by `tmp_dir`.

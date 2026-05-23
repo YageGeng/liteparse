@@ -496,8 +496,7 @@ pub async fn convert_data_to_pdf(
         .path()
         .join(format!("input.{}", ext.unwrap_or("bin".to_string())));
     tokio::fs::write(&tmp_path, data).await?;
-    let (converted, output_dir) =
-        convert_to_pdf(tmp_path.to_str().unwrap(), password).await?;
+    let (converted, output_dir) = convert_to_pdf(tmp_path.to_str().unwrap(), password).await?;
     Ok((
         converted,
         BufferConversionTemps {
