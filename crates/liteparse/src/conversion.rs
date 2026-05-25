@@ -643,7 +643,9 @@ mod tests {
         assert!(
             !staging_path.exists(),
             "staging temp dir should be removed on drop"
-    
+        );
+    }
+
     // ── find_pdf_in_dir ──────────────────────────────────────────────────────
 
     /// Regression test for the LibreOffice filename-sanitisation bug.
