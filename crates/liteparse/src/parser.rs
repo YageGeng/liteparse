@@ -129,7 +129,21 @@ impl LiteParse {
                 target_pages.as_deref(),
                 self.config.max_pages,
             )?;
+            let t_extract = web_time::Instant::now();
+            log(&format!(
+                "[liteparse] extract: {:.1}ms ({} pages)",
+                t_extract.duration_since(t0).as_secs_f64() * 1000.0,
+                pages.len()
+            ));
             let rendered = ocr_merge::render_pages_for_ocr(&document, &pages, self.config.dpi)?;
+            log(&format!(
+                "[liteparse] ocr render: {:.1}ms ({} pages)",
+                web_time::Instant::now()
+                    .duration_since(t_extract)
+                    .as_secs_f64()
+                    * 1000.0,
+                rendered.len()
+            ));
             (pages, rendered)
         } else {
             let pages = extract::extract_pages_from_input(
@@ -138,14 +152,14 @@ impl LiteParse {
                 self.config.max_pages,
                 password,
             )?;
+            log(&format!(
+                "[liteparse] extract: {:.1}ms ({} pages)",
+                web_time::Instant::now().duration_since(t0).as_secs_f64() * 1000.0,
+                pages.len()
+            ));
             (pages, Vec::new())
         };
         let t1 = web_time::Instant::now();
-        log(&format!(
-            "[liteparse] extract: {:.1}ms ({} pages)",
-            t1.duration_since(t0).as_secs_f64() * 1000.0,
-            pages.len()
-        ));
 
         // OCR pass
         if self.config.ocr_enabled {

@@ -34,6 +34,7 @@ pub async fn ocr_and_merge_pages(
         ocr_engine,
         ocr_language,
         num_workers,
+        None,
     )
     .await
 }
@@ -49,8 +50,9 @@ pub async fn ocr_and_merge_pages_from_input(
     ocr_engine: Arc<dyn OcrEngine>,
     ocr_language: &str,
     num_workers: usize,
+    password: Option<&str>,
 ) -> Result<(), LiteParseError> {
-    let document = load_document_from_input(input, None)?;
+    let document = load_document_from_input(input, password)?;
     let rendered = render_pages_for_ocr(&document, pages, dpi)?;
     ocr_and_merge_rendered(pages, rendered, dpi, ocr_engine, ocr_language, num_workers).await
 }
