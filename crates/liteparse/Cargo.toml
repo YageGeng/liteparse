@@ -32,6 +32,7 @@ tempfile = "3.27.0"
 thiserror = "2"
 tesseract-rs = { version = "0.2", features = ["build-tesseract"], optional = true }
 tokio = { version = "1.52.3", features = ["rt", "macros", "sync", "time", "io-util"] }
+url = "2"
 web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

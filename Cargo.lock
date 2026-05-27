@@ -1221,6 +1221,7 @@ dependencies = [
  "tesseract-rs",
  "thiserror 2.0.18",
  "tokio",
+ "url",
  "web-time",
 ]
 
