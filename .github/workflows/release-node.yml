@@ -139,6 +139,10 @@ jobs:
               # so disable crt-static for the final link. Build scripts still link static
               # against openssl/zlib via the static libs above.
               export RUSTFLAGS="-C target-feature=-crt-static"
+              # tesseract-rs CMake project hard-codes clang++ as the default CXX; alpine
+              # ships gcc/g++ via build-base, so point CMake at those explicitly.
+              export CC=gcc CXX=g++
+              export CMAKE_C_COMPILER=gcc CMAKE_CXX_COMPILER=g++
               npx napi build --cargo-cwd ../../crates/liteparse-napi --platform --release --js false --dts native.d.ts --target x86_64-unknown-linux-musl .
             '
 
