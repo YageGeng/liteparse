@@ -93,7 +93,10 @@ fn canonical_rotation(rotation: f32) -> i32 {
     let mut best = 0.0f32;
     let mut best_delta = f32::INFINITY;
     for c in candidates {
-        let delta = (r - c).abs();
+        // Circular angular distance, so rotations just under 360° are treated
+        // as near 0° (e.g. 359° is 1° from upright, not 89° from 270°).
+        let raw = (r - c).abs();
+        let delta = raw.min(360.0 - raw);
         if delta < best_delta {
             best_delta = delta;
             best = c;
@@ -2744,5 +2747,39 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert!(parsed[0].text.is_empty());
         assert!(parsed[0].text_items.is_empty());
+    }
+
+    #[test]
+    fn canonical_rotation_snaps_cardinals_and_near_cardinals() {
+        // Exact cardinals are unchanged.
+        assert_eq!(canonical_rotation(0.0), 0);
+        assert_eq!(canonical_rotation(90.0), 90);
+        assert_eq!(canonical_rotation(180.0), 180);
+        assert_eq!(canonical_rotation(270.0), 270);
+
+        // Small offsets within the 2° tolerance snap to the nearest cardinal.
+        assert_eq!(canonical_rotation(1.0), 0);
+        assert_eq!(canonical_rotation(88.5), 90);
+        assert_eq!(canonical_rotation(271.0), 270);
+    }
+
+    #[test]
+    fn canonical_rotation_snaps_near_360_to_zero() {
+        // Rotations just under 360° are ~upright and must snap to 0, not be
+        // treated as ~270° (regression: linear distance picked 270 for 359°).
+        assert_eq!(canonical_rotation(358.0), 0);
+        assert_eq!(canonical_rotation(359.0), 0);
+        assert_eq!(canonical_rotation(359.5), 0);
+        // rem_euclid normalizes out-of-range / negative inputs first.
+        assert_eq!(canonical_rotation(360.0), 0);
+        assert_eq!(canonical_rotation(-1.0), 0);
+    }
+
+    #[test]
+    fn canonical_rotation_passes_through_non_cardinal_angles() {
+        // Beyond the 2° snap tolerance the rounded raw angle is returned,
+        // including angles near (but not within tolerance of) 360°.
+        assert_eq!(canonical_rotation(45.0), 45);
+        assert_eq!(canonical_rotation(357.0), 357);
     }
 }
