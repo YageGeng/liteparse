@@ -154,7 +154,7 @@ Steps 1–8 = usable v1. Steps 9–11 = quality bumps for specific doc classes.
 > **Doc-level losses:** doc 01030000000122 (lab manual with sparse bullets in two columns) NID 0.525 → 0.471. Doc 122's histogram does show two roughly-balanced peaks at x=229 and x=457 with 92/17 items — technically passes the gates because the 92 includes a long chunk of straight-through-the-page paragraphs that all happen to start at the same x — but the doc is structurally a single column of mixed bullet/figure/table content where slicing into a "right column" creates phantom reading-order jumps. Not worth tighter gates that would also lose doc 029.
 >
 > **Carry-forwards still open after this pass:**
-> - **Approach #2 (mask spanning items from density projection).** Before computing the V-cut density valley, drop items whose width ≥ ~70% of the region width — those are headings/figures/tables that span columns and are the reason the density valley search fails in the first place. Symmetric to the figure-obstacle code added 2026-06-01 (which masks figures along *H-cuts*). Should catch the 14 still-MHS=0 docs whose layout has a clean gutter once spanning elements are excluded.
+> - **Approach #2 (mask spanning items from density projection).** ❌ TRIED AND REVERTED 2026-06-02 — see the 2026-06-02 entry below. Masking items ≥70% region width from the V-cut made density cuts slice tables/wide layouts column-wise and regressed all three metrics. The legitimate column case is already handled by the gated `xy_find_column_cut` fallback. Do not retry without a guard that prevents the revealed valley from cutting through tabular content.
 > - **Approach #3 (split-at-big-gap inside `build_projected_lines`).** Even if XY-cut fails, the per-leaf y-banding step could split a band whose items have a horizontal gap ≥ ~6–8 × median glyph advance AND ≥ ~30pt absolute. This is what `pdftotext` does. Riskier — justified prose has wide inter-word gaps, especially near inline figures — so should be tightly gated and only as a last resort if #2 doesn't close the remainder.
 > - **`xy_root_bbox` negative-x handling.** Book-spread layouts where items have x<0 break bbox-relative reasoning everywhere downstream. A conditional "items extend past MediaBox" detector that widens the bbox only for those pages would unlock the rest of doc 029 and likely a handful of other book-interior PDFs.
 >
@@ -164,6 +164,69 @@ Steps 1–8 = usable v1. Steps 9–11 = quality bumps for specific doc classes.
 > - OCR regression in `ocr_merge` — not a markdown problem per se but blocks any real OCR-on benchmark.
 >
 > **Bench plumbing landed:** `opendataloader-bench/src/pdf_parser_liteparse_placeholder.py` (image_mode=placeholder variant) and `pdf_parser_liteparse_ocr.py` (ocr_enabled=True variant), both registered in `engine_registry.py`. `liteparse-placeholder` confirms image placeholders cost ~0.003 NID — negligible vs the structural gains, so `Placeholder` is the right default.
+
+> **2026-06-01 TOC suppression pass.** Bench analysis vs. nutrient (0.885 overall, lp 0.745) identified two MHS failure clusters: (a) **TOC entry over-promotion** — docs 16, 18, 113, 171 each emitted 4-20 false-positive `# Chapter X 41`-style headings when the doc was just a TOC where GT wants 1 `# Contents` heading; (b) docs that are missing a single section heading on 2-column layouts (38, 77, 189) — layout-related, deferred. Fix in `markdown_layout/headings.rs` + `classify.rs`:
+> - **`toc_entry_arabic_number(text)`**: returns the trailing arabic page number when the line looks like a TOC entry — ≥8 alpha chars in the body, separator that includes whitespace (rejecting decimals like "94.2" or chart values "OCR-Recall 7 94.2"), 1-4 digit tail, body doesn't end in a digit (rejecting "vol 5 12" multi-number tails). The ≥8-alpha threshold protects real one-word headings like "Chapter 7" / "Section 4".
+> - **`looks_like_toc_entry`**: wraps arabic + a separate Roman-numeral check (matches "Author's Note ... ix"). Used only for the page-level row floor count.
+> - **`is_toc_title`**: matches normalized "contents" / "table of contents" / "index" / "list of figures" etc. Force-promoted to H1 on TOC pages even when the heading-map size filters would have dropped it (single-occurrence, short, etc.).
+> - **`page_is_toc`**: page qualifies when ≥4 TOC-like lines AND ≥3 arabic-trailing entries whose page numbers form a ≥70% non-decreasing sequence. The monotonicity check is what separates real TOCs from chart/graph pages with random axis-value tails (doc 199 was the calibration target — was getting false-positive'd, now correctly rejected).
+> - **Classifier wiring** (`classify.rs::classify_page_with_filters`): per-page `toc_page = page_is_toc(page)`. Per-line `toc_suppress = toc_page && !is_toc_title(text)` guards the size-based, numbered-bold-heading, and bold-heading promotion sites. A separate `toc_title_level = Some(1)` path force-promotes the TOC's own title even when size_level was None.
+> - **Tests**: 4 new unit tests (`toc_entry_arabic_extracts_trailing_page_number`, `toc_entry_arabic_rejects_decimals_and_axis_labels`, `is_toc_title_matches_common_variants`, `page_is_toc_requires_monotonic_page_numbers`). 151 lib + 10 integration tests pass.
+>
+> **Bench result on opendataloader-bench (200 docs):**
+>
+> | Metric | Pre-fix | Post-fix | Δ |
+> |---|---|---|---|
+> | NID  | 0.8822 | 0.8822 | ~0 |
+> | TEDS | 0.3862 | 0.3862 | 0 (no table changes) |
+> | MHS  | 0.5146 | **0.5358** | **+0.0212** |
+> | Overall | 0.7451 | **0.7573** | **+0.0122** |
+>
+> **Per-doc wins** (MHS): doc 16: 0.074→0.750, doc 18: 0.025→0.651, doc 113: ?→0.892, doc 171: 0.133→0.744, doc 51: regression-then-recovered 0.94, doc 153: 0.83.
+>
+> **Still wide-open after this pass** (rough TODO priority):
+> - **TEDS** still 0.39 vs nutrient 0.71. Biggest gaps are docs 89, 47, 128, 182, 88, 90 — multi-line wrapped header rows where each column's header text spans multiple baselines at staggered positions; the borderless detector closes the run after 1 row because the first "row" comes back as 1 merged cell. Other failure mode: complex spreadsheet-like grids (docs 119, 120, 121, 130, 149, 180, 121) where ground truth uses `<table>` HTML with multi-line cells and our column detector slices the layout into 2-3 tiny tables. Both need either ML-grade cell detection or a much smarter borderless table merger that walks back to absorb headers above a detected body.
+> - **MHS** — remaining MHS=0 docs are dominated by 2-column section headings being eaten by adjacent-column body text (docs 7, 13, 38, 77, 118, 148, 177, 178, 189, 198). Same root cause as the long-tracked `paper.pdf` page-1 banner issue: layout decomposition can't isolate single-line bold section heads that sit at the same y-band as content in the other column. Needs the wide-banner / figure-rect-aware XY-cut refinements.
+> - **TEDS multi-line header absorption** is the highest-leverage table fix — would lift docs 47, 89, 182, 88, 90 from 0.1–0.4 to ~0.7+. Approach: when ruled-grid detection or borderless detection finds a body table, walk back N lines (where N matches the detected column count's track positions) and check if those upper lines have cells aligning to the same column tracks → absorb as header rows.
+
+> **2026-06-02 ruled-grid single-column tables (`tables.rs`).** Targeted the largest TEDS=0 cluster (15 docs with GT tables we emitted 0 columns for). Single-col GT table was 1 doc (149), but the same code path also unblocked thin-border-strip docs whose true content column was wedged between two phantom rule-strip columns. Three coordinated changes in `build_ruled_table`:
+>
+> - **Threshold relaxation:** `xs.len() >= 3` → `xs.len() >= 2`. Allows the detector to produce 1-column tables when the geometry only gives a single content column between borders.
+> - **Phantom-row collapse:** after cell assignment, drop rows whose height < 0.8 × median non-empty row height AND that have no text. Doc 149 draws each visual row as three stacked rects (top-border 1pt, body 22pt, bottom-strip 5pt) which all survive 2pt y-clustering as separate grid rows — without collapse, the empty-cell fraction kills the table. Threshold preserves real fill-in-the-blank forms (empty body rows match median non-empty height).
+> - **Phantom-column collapse:** mirror of the row rule for columns. Drop empty columns whose width < 0.3 × median non-empty column width. Doc 149 has 5.5pt left/right border-strip columns next to a 305pt content column — both drop cleanly.
+>
+> One stricter rule in `merge_table_runs`: a 1-column ruled run **yields to** a multi-column borderless run that overlaps the same line range. Without this, doc 078's data table (drawn with top/bottom/header rules but no internal V-rules) gets detected as a degenerate 1-col grid that overrides the correct 7-col borderless result. Path geometry strictly beats text alignment for *multi*-col ruled runs, but a 1-col ruled run is ambiguous — could be a real single-column table or a multi-col table missing its V-rules — so we defer to the multi-col borderless evidence when present.
+>
+> **Bench result (200 docs):**
+>
+> | Metric | Pre | Post | Δ |
+> |---|---|---|---|
+> | NID  | 0.8824 | 0.8819 | −0.0005 (noise) |
+> | TEDS | 0.3906 | **0.4144** | **+0.0238** |
+> | MHS  | 0.5913 | 0.5928 | +0.0015 |
+> | Overall | 0.7713 | **0.7738** | **+0.0025** |
+>
+> **Per-doc:** doc 149 0 → 1.0 TEDS (clean recovery — 8-row single-col ECO Circle competence stack). Several mid-TEDS docs (128, 170, 188) also improved a few hundredths each — likely because the `0.8 × median` row collapse now bridges thin-rule rows in their existing detections. No TEDS regressions ≥ 0.01.
+>
+> **Still wide open after this pass** — the bulk of the TEDS=0 cluster is **2-column tables** (7 docs: 121, 132, 146, 150, 165, 166, 197). The borderless detector explicitly requires `TABLE_MIN_COLUMNS = 3`, which kills every 2-col borderless table on the bench. Lowering it to 2 is high-leverage but risky: key:value bullet lists and 2-column body layouts will look the same. Needs guards before attempting. The ruled-grid path I just relaxed can pick up 2-col ruled tables (doc 146 has heavy graphics), but they don't appear to fire — likely because the connected-component step is splitting the grid, or because `find_grid_components` requires ≥2 H AND ≥2 V components to cross within 3pt and doc 146 has many tiny rect segments that don't cleanly cross. Worth dumping next pass.
+>
+> **2026-06-02 heading char-floor, TOC-title, header absorption; XY-cut spanning-mask tried and reverted.** Four targeted heuristic changes plus one reverted layout experiment. Net result on opendataloader-bench (200 docs):
+>
+> | Metric | Pre (260601) | Post | Δ |
+> |---|---|---|---|
+> | NID  | 0.8822 | 0.8824 | +0.0002 |
+> | TEDS | 0.3862 | **0.3906** | **+0.0044** |
+> | MHS  | 0.5358 | **0.5913** | **+0.0555** |
+> | Overall | 0.7573 | **0.7713** | **+0.0140** |
+>
+> - **Item 1 — heading char-floor (`headings.rs`).** `MIN_HEADING_TOTAL_CHARS` 25→10 (now just a noise guard); added `MIN_HEADING_AVG_LINE_CHARS = 8.0` as the real legend-token discriminator. `build_heading_map` now keeps a size-outlier cluster iff `avg_line_chars` is in `[8, MAX]`. Rescues clean single-line headings like "Aligning with Your Identity" (24 chars/line) that the 25-char floor dropped, while still rejecting paper-legend tokens ("A-mem"/"Base" ≈ 4-5 chars/line). MHS contributor.
+> - **Item 3 — TOC title without `page_is_toc` (`classify.rs`).** `toc_title_level` now fires on `is_toc_title(text)` alone (was gated on `toc_page`). `is_toc_title` matches the whole trimmed line against an exact whitelist (contents / table of contents / index / …) so it can't fire mid-prose. MHS contributor.
+> - **Item 4 — multi-line header absorption (`tables.rs`).** After the borderless detector builds a body run, `absorb_header_lines` walks backward (bounded by `floor` = prior run's end) pulling in lines whose cells (2 ≤ n ≤ column_count) all align to the established column tracks and sit tight above the row below. Multiple wrapped header lines collapse into one markdown header row (joined per-track top-to-bottom). `try_detect_table` gained a `floor` param; `detect_tables` threads the last run end through it. Single-cell titles are explicitly NOT absorbed (≥2 aligned cells required). 2 new unit tests. **TEDS +0.0044, NID neutral** — a clean win. Per-doc: 128 +0.069, 170 +0.062, 188 +0.059.
+> - **Item 5 — XY-cut spanning-item mask (REVERTED).** Implemented Approach #2 (mask items ≥70% region width from the V-cut density projection). Bench showed it **hurt all three metrics**: TEDS 0.3906→0.3614, NID 0.8824→0.8780, MHS 0.5913→0.5821. Root cause: masking wide items makes density V-cuts fire *inside* tables and wide layouts, slicing them column-wise (docs 082/187/189 lost both TEDS and NID together — the signature of a split table). The existing `xy_find_column_cut` fallback (gated to fire only when both density cuts return None) already covers the legitimate column case without the collateral damage. **Conclusion: the density V-cut must stay conservative; spanning-mask is the wrong lever. Do not retry without a tabular-content guard that prevents the revealed valley from cutting through a table.** Fully reverted (constant + mask loop removed from `xy_find_best_cut`).
+>
+> **Item 2 (sparse-form ruled-table empty-cell relaxation) remains deferred** — `TABLE_MAX_EMPTY_CELL_FRACTION` stays 0.30. Real sparse table (doc 180) and spurious decorative grid (doc 198 TOC) are both ~75% empty, so empty-fraction is not a valid discriminator; loosening it regressed TEDS −0.089.
+>
+> **Struct-tag question answered:** 0/200 bench docs carry PDF struct tags (verified via `survey_tags` example), so the struct-tree heading path is moot for this benchmark — all gains must come from text/geometry heuristics.
 
 ## Carried-forward items
 

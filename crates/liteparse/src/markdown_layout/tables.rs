@@ -281,7 +281,7 @@ fn row_spacing_cv(rows: &[(usize, &ProjectedLine, Vec<TableCell>)]) -> f32 {
 /// a `TableRun` with `Block::Table` or `Block::GridFallback`; on failure
 /// returns `None` (and the caller should fall through to per-line
 /// classification).
-fn try_detect_table(lines: &[ProjectedLine], start_idx: usize) -> Option<TableRun> {
+fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> Option<TableRun> {
     let first_cells = split_cells(&lines[start_idx]);
     if first_cells.len() < TABLE_MIN_COLUMNS {
         return None;
@@ -383,16 +383,30 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize) -> Option<TableRu
         });
     }
 
-    // Promote the first row to header iff every cell in it is bold (matches
-    // pymupdf4llm's "bold-or-filled" heuristic; fills require fork data).
+    // Walk back above the detected body and absorb header lines that align to
+    // the same column tracks but weren't includable as body rows (merged /
+    // partial header cells). Multiple wrapped header lines collapse into one
+    // markdown header row, joined per-column top-to-bottom.
+    let absorbed = absorb_header_lines(lines, start_idx, &tracks, column_count, floor);
+
+    // Promote the first body row to header iff every cell in it is bold
+    // (matches pymupdf4llm's "bold-or-filled" heuristic; fills require fork
+    // data). Skipped when we already absorbed an explicit header above.
     let first_row = &rows[0].2;
-    let header_qualifies = first_row.iter().all(|c| c.bold);
-    let header = if header_qualifies {
-        Some(first_row.iter().map(|c| c.text.clone()).collect())
-    } else {
-        None
+    let bold_header_qualifies = absorbed.is_none() && first_row.iter().all(|c| c.bold);
+
+    // `row_start` is the index of the first body row within `rows`. When the
+    // header came from absorbed lines above, every detected row is body data;
+    // only the bold-first-row promotion consumes rows[0].
+    let (run_start, header, row_start) = match absorbed {
+        Some((hstart, header_texts)) => (hstart, Some(header_texts), 0),
+        None if bold_header_qualifies => (
+            start_idx,
+            Some(first_row.iter().map(|c| c.text.clone()).collect()),
+            1,
+        ),
+        None => (start_idx, None, 0),
     };
-    let row_start = if header.is_some() { 1 } else { 0 };
     let body_rows: Vec<Vec<String>> = rows[row_start..]
         .iter()
         .map(|(_, _, cells)| cells.iter().map(|c| c.text.clone()).collect())
@@ -402,7 +416,7 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize) -> Option<TableRu
     }
 
     Some(TableRun {
-        start: start_idx,
+        start: run_start,
         end,
         block: Block::Table {
             header,
@@ -411,14 +425,81 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize) -> Option<TableRu
     })
 }
 
+/// Walk backward from `start_idx` (not below `floor`), pulling in lines whose
+/// cells all align to the table's `tracks` as header rows. Returns the new
+/// start index and a single merged header row (`column_count` columns) with
+/// each absorbed line's text appended into its nearest column track.
+fn absorb_header_lines(
+    lines: &[ProjectedLine],
+    start_idx: usize,
+    tracks: &[f32],
+    column_count: usize,
+    floor: usize,
+) -> Option<(usize, Vec<String>)> {
+    let mut absorbed: Vec<Vec<TableCell>> = Vec::new();
+    let mut j = start_idx;
+    while j > floor {
+        let cand = j - 1;
+        let cells = split_cells(&lines[cand]);
+        // A header line must carry at least two track-aligned cells (a single
+        // cell is a title/caption, not a header), no more than column_count,
+        // sit tight above the row below it, and have every cell land on a
+        // known column track.
+        if cells.len() < 2 || cells.len() > column_count {
+            break;
+        }
+        if !table_rows_adjacent(&lines[cand], &lines[j]) {
+            break;
+        }
+        let all_align = cells.iter().all(|c| {
+            tracks
+                .iter()
+                .any(|t| (c.start_x - *t).abs() <= TABLE_TRACK_TOLERANCE_PT)
+        });
+        if !all_align {
+            break;
+        }
+        absorbed.push(cells);
+        j = cand;
+    }
+    if absorbed.is_empty() {
+        return None;
+    }
+    // Collected bottom-up; reverse so text reads top-to-bottom per column.
+    absorbed.reverse();
+    let mut header = vec![String::new(); column_count];
+    for cells in &absorbed {
+        for c in cells {
+            let Some(idx) = tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| (c.start_x - **t).abs() <= TABLE_TRACK_TOLERANCE_PT)
+                .min_by(|(_, a), (_, b)| {
+                    (c.start_x - **a).abs().total_cmp(&(c.start_x - **b).abs())
+                })
+                .map(|(i, _)| i)
+            else {
+                continue;
+            };
+            if !header[idx].is_empty() && !c.text.is_empty() {
+                header[idx].push(' ');
+            }
+            header[idx].push_str(&c.text);
+        }
+    }
+    Some((j, header))
+}
+
 /// Scan `lines` once and return all detected tabular regions (sorted by
 /// `start`). Caller uses these as cut-points so the per-line classifier never
 /// sees lines inside a table.
 pub(super) fn detect_tables(lines: &[ProjectedLine]) -> Vec<TableRun> {
     let mut out = Vec::new();
     let mut i = 0;
+    let mut floor = 0;
     while i < lines.len() {
-        if let Some(run) = try_detect_table(lines, i) {
+        if let Some(run) = try_detect_table(lines, i, floor) {
+            floor = run.end;
             i = run.end;
             out.push(run);
         } else {
@@ -474,6 +555,11 @@ const TABLE_GRID_CLUSTER_PT: f32 = 2.0;
 const TABLE_CROSS_TOLERANCE_PT: f32 = 3.0;
 
 /// Reject ruled-table candidates whose empty-cell fraction exceeds this.
+/// NOTE: this can't be loosened to recover blank worksheets/forms — a real
+/// sparse table (doc 180, a 4-col Version History, ~75% empty) and a spurious
+/// grid from decorative layout boxes (doc 198, a TOC, also ~75% empty) are
+/// indistinguishable on empty-fraction, and relaxing it net-regressed TEDS by
+/// ~0.09 on the bench (more false tables than real forms recovered).
 const TABLE_MAX_EMPTY_CELL_FRACTION: f32 = 0.30;
 
 /// Reject candidates whose grid covers nearly the whole page — almost always
@@ -672,8 +758,12 @@ fn build_ruled_table(
     xs.sort_by(|a, b| a.total_cmp(b));
     dedup_close(&mut xs, TABLE_GRID_CLUSTER_PT);
 
-    // Need ≥2 cells per axis → ≥3 boundary lines.
-    if ys.len() < 3 || xs.len() < 3 {
+    // Need ≥2 row boundaries (1 row) and ≥2 column boundaries (1 col); but
+    // a 1×1 grid is just a callout box, so also require ≥1 inner divider
+    // (i.e. ys.len() ≥ 3 for ≥2 rows). Single-column tables (`xs.len() == 2`)
+    // are accepted when row evidence is strong enough — extra guards apply
+    // below after the empty-row collapse.
+    if ys.len() < 3 || xs.len() < 2 {
         return None;
     }
 
@@ -730,6 +820,122 @@ fn build_ruled_table(
     }
 
     if consumed_indices.is_empty() {
+        return None;
+    }
+
+    // Collapse "phantom rows" produced by stacked thin border-strip rects
+    // (doc 149 draws each visual table row as: top border strip ~1pt, body
+    // rect ~22pt, bottom border strip ~5pt — each contributes y-coords that
+    // survive the 2pt clustering as separate grid rows). Rule: drop a row
+    // iff (a) it has no text in any cell AND (b) its height is < 50% of the
+    // median non-empty row height. The height gate preserves real
+    // fill-in-the-blank forms where empty body rows are full-height.
+    let row_heights: Vec<f32> = (0..n_rows).map(|r| ys[r + 1] - ys[r]).collect();
+    let nonempty_heights: Vec<f32> = (0..n_rows)
+        .filter(|r| cell_has_text[*r].iter().any(|t| *t))
+        .map(|r| row_heights[r])
+        .collect();
+    let median_h = if !nonempty_heights.is_empty() {
+        let mut s = nonempty_heights.clone();
+        s.sort_by(|a, b| a.total_cmp(b));
+        s[s.len() / 2]
+    } else {
+        let mut s = row_heights.clone();
+        s.sort_by(|a, b| a.total_cmp(b));
+        s[s.len() / 2]
+    };
+    let keep: Vec<bool> = (0..n_rows)
+        .map(|r| {
+            let has_text = cell_has_text[r].iter().any(|t| *t);
+            has_text || row_heights[r] >= median_h * 0.8
+        })
+        .collect();
+    let cells: Vec<Vec<String>> = (0..n_rows)
+        .filter(|r| keep[*r])
+        .map(|r| cells[r].clone())
+        .collect();
+    let cell_has_text: Vec<Vec<bool>> = (0..n_rows)
+        .filter(|r| keep[*r])
+        .map(|r| cell_has_text[r].clone())
+        .collect();
+    let cell_is_bold: Vec<Vec<bool>> = (0..n_rows)
+        .filter(|r| keep[*r])
+        .map(|r| cell_is_bold[r].clone())
+        .collect();
+    let n_rows = cells.len();
+    if n_rows < 2 {
+        return None;
+    }
+
+    // Mirror the row-collapse rule on columns. Some ruled tables (doc 149)
+    // draw their left/right borders as thin strip rects 5pt wide — those
+    // become phantom columns with no text. Drop columns that are both empty
+    // AND noticeably narrower than the median text-bearing column.
+    let col_widths: Vec<f32> = (0..n_cols).map(|c| xs[c + 1] - xs[c]).collect();
+    let nonempty_col_widths: Vec<f32> = (0..n_cols)
+        .filter(|c| (0..n_rows).any(|r| cell_has_text[r][*c]))
+        .map(|c| col_widths[c])
+        .collect();
+    let median_w = if !nonempty_col_widths.is_empty() {
+        let mut s = nonempty_col_widths.clone();
+        s.sort_by(|a, b| a.total_cmp(b));
+        s[s.len() / 2]
+    } else {
+        let mut s = col_widths.clone();
+        s.sort_by(|a, b| a.total_cmp(b));
+        s[s.len() / 2]
+    };
+    let keep_col: Vec<bool> = (0..n_cols)
+        .map(|c| {
+            let has_text = (0..n_rows).any(|r| cell_has_text[r][c]);
+            has_text || col_widths[c] >= median_w * 0.3
+        })
+        .collect();
+    // Cap how aggressively we drop columns. A real table with one phantom
+    // border-strip column (doc 149: 5pt-wide left border) drops exactly one.
+    // Anything more than that is almost certainly a chart whose vertical
+    // grid-lines got merged with text data (doc 078: a chart's 18 V-lines
+    // straddle a table to its left/right and collapse to 1 col), so the
+    // "table" is bogus — bail and let the borderless detector handle it.
+    // Note: keep_col already only drops columns where both (a) no text AND
+    // (b) width < 30% of median text-bearing column.
+    let cells: Vec<Vec<String>> = cells
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .enumerate()
+                .filter(|(c, _)| keep_col[*c])
+                .map(|(_, v)| v)
+                .collect()
+        })
+        .collect();
+    let cell_has_text: Vec<Vec<bool>> = cell_has_text
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .enumerate()
+                .filter(|(c, _)| keep_col[*c])
+                .map(|(_, v)| v)
+                .collect()
+        })
+        .collect();
+    let cell_is_bold: Vec<Vec<bool>> = cell_is_bold
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .enumerate()
+                .filter(|(c, _)| keep_col[*c])
+                .map(|(_, v)| v)
+                .collect()
+        })
+        .collect();
+    let n_cols = cells.first().map(|r| r.len()).unwrap_or(0);
+    if n_cols == 0 {
+        return None;
+    }
+    // Single-column tables are ambiguous (could be a captioned card) — require
+    // ≥3 rows of geometric + textual evidence.
+    if n_cols == 1 && n_rows < 3 {
         return None;
     }
 
@@ -837,16 +1043,39 @@ pub(super) fn detect_ruled_tables(
 /// ranges overlap the ruled run wins (path-based geometry is strictly stronger
 /// than text-alignment heuristics) — overlapping borderless runs are dropped.
 pub(super) fn merge_table_runs(mut ruled: Vec<TableRun>, borderless: Vec<TableRun>) -> Vec<TableRun> {
+    // A ruled run normally beats an overlapping borderless run (path geometry
+    // is a stronger signal than text alignment). But a 1-column ruled run is
+    // ambiguous — it can come from a real single-column table (doc 149's
+    // stacked cards) OR from a multi-column table whose vertical separators
+    // are implicit and only the top/bottom rules were drawn (doc 078). Yield
+    // to a multi-column borderless run that covers the same range.
+    let mut kept: Vec<TableRun> = Vec::with_capacity(ruled.len());
+    for r in ruled.drain(..) {
+        let is_one_col = matches!(&r.block, Block::Table { rows, .. } if rows.first().map(|row| row.len()).unwrap_or(0) <= 1);
+        if is_one_col {
+            let beaten = borderless.iter().any(|b| {
+                let overlaps = !(b.end <= r.start || b.start >= r.end);
+                if !overlaps {
+                    return false;
+                }
+                matches!(&b.block, Block::Table { rows, .. } if rows.first().map(|row| row.len()).unwrap_or(0) >= 2)
+            });
+            if beaten {
+                continue;
+            }
+        }
+        kept.push(r);
+    }
     for b in borderless {
-        let overlaps = ruled
+        let overlaps = kept
             .iter()
             .any(|r| !(b.end <= r.start || b.start >= r.end));
         if !overlaps {
-            ruled.push(b);
+            kept.push(b);
         }
     }
-    ruled.sort_by_key(|r| r.start);
-    ruled
+    kept.sort_by_key(|r| r.start);
+    kept
 }
 
 /// Escape `|` and `\n` inside a markdown table cell so the pipe-table grammar
@@ -949,6 +1178,49 @@ mod tests {
         let cells = split_cells(&l);
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].text, "Hello world");
+    }
+
+    #[test]
+    fn absorbs_partial_header_line_above_body() {
+        // A header line with only two track-aligned cells sits above a clean
+        // 3-column body. It can't start the table on its own (fewer than
+        // TABLE_MIN_COLUMNS cells) but should be walked back in as the header.
+        let lines = vec![
+            line_with_spans(&[("Name", 50.0), ("Scores", 150.0)], 100.0, 10.0),
+            line_with_spans(&[("A", 50.0), ("1", 150.0), ("2", 250.0)], 115.0, 10.0),
+            line_with_spans(&[("B", 50.0), ("3", 150.0), ("4", 250.0)], 130.0, 10.0),
+            line_with_spans(&[("C", 50.0), ("5", 150.0), ("6", 250.0)], 145.0, 10.0),
+        ];
+        let runs = detect_tables(&lines);
+        assert_eq!(runs.len(), 1);
+        let run = &runs[0];
+        assert_eq!(run.start, 0, "header line should be absorbed into the run");
+        assert_eq!(run.end, 4);
+        match &run.block {
+            Block::Table { header, rows } => {
+                let header = header.as_ref().expect("header should be present");
+                assert_eq!(header, &vec!["Name".to_string(), "Scores".to_string(), String::new()]);
+                // All three body rows survive — the header came from above, so
+                // rows[0] is not consumed as a header.
+                assert_eq!(rows.len(), 3);
+            }
+            other => panic!("expected Block::Table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn does_not_absorb_single_cell_title_above_body() {
+        // A one-cell title/caption above a table is NOT a header row and must
+        // not be absorbed.
+        let lines = vec![
+            line_with_spans(&[("Results", 50.0)], 100.0, 10.0),
+            line_with_spans(&[("A", 50.0), ("1", 150.0), ("2", 250.0)], 115.0, 10.0),
+            line_with_spans(&[("B", 50.0), ("3", 150.0), ("4", 250.0)], 130.0, 10.0),
+            line_with_spans(&[("C", 50.0), ("5", 150.0), ("6", 250.0)], 145.0, 10.0),
+        ];
+        let runs = detect_tables(&lines);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].start, 1, "single-cell title must stay out of the run");
     }
 
     #[test]

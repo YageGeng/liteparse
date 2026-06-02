@@ -57,6 +57,168 @@ pub(super) fn is_caption_line(text: &str) -> bool {
     false
 }
 
+/// Trailing page-number extractor for TOC-entry shaped lines. Returns the
+/// numeric value of the trailing page number when the line looks like a TOC
+/// entry: alphabetic body, separator that *includes whitespace* (to reject
+/// decimals like "94.2"), then a trailing arabic 1–4 digit number. Roman
+/// numerals are accepted in `looks_like_toc_entry` but not returned for the
+/// monotonic-sequence check.
+pub(super) fn toc_entry_arabic_number(text: &str) -> Option<i32> {
+    let s = text.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let mut tail_start = n;
+    while tail_start > 0 && chars[tail_start - 1].is_ascii_digit() {
+        tail_start -= 1;
+    }
+    let tail_len = n - tail_start;
+    if tail_len == 0 || tail_len > 4 {
+        return None;
+    }
+    // Separator: ≥1 whitespace + optional '.' leaders. The mandatory
+    // whitespace rules out decimals ("94.2") and inline number suffixes
+    // ("Recall3 7 94.2") that aren't TOC entries.
+    let mut sep_end = tail_start;
+    let mut saw_ws = false;
+    while sep_end > 0 {
+        let c = chars[sep_end - 1];
+        if c.is_whitespace() {
+            sep_end -= 1;
+            saw_ws = true;
+        } else if c == '.' {
+            sep_end -= 1;
+        } else {
+            break;
+        }
+    }
+    if !saw_ws {
+        return None;
+    }
+    // Body must (a) carry meaningful alpha content and (b) NOT end with a
+    // digit — that would mean we sliced a multi-part number ("vol 5 12").
+    let body = &chars[..sep_end];
+    let alpha = body.iter().filter(|c| c.is_alphabetic()).count();
+    // Require ≥8 alpha chars in the body. This keeps real one-word headings
+    // like "Chapter 7" / "Section 4" out of the TOC bucket while still
+    // accepting typical TOC entries ("Introduction 7", "Conclusion 127", ...).
+    if alpha < 8 {
+        return None;
+    }
+    if body
+        .iter()
+        .rev()
+        .find(|c| !c.is_whitespace())
+        .is_some_and(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    let tail: String = chars[tail_start..].iter().collect();
+    tail.parse::<i32>().ok()
+}
+
+/// Roman-or-arabic TOC-entry detector — used by tests and the TOC-page
+/// detector to count TOC-shaped lines that the strict arabic extractor
+/// above misses (e.g. "Author's Note ... ix").
+pub(super) fn looks_like_toc_entry(text: &str) -> bool {
+    if toc_entry_arabic_number(text).is_some() {
+        return true;
+    }
+    // Try Roman numerals at the tail.
+    let s = text.trim();
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let mut tail_start = n;
+    while tail_start > 0
+        && matches!(
+            chars[tail_start - 1],
+            'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm' | 'I' | 'V' | 'X' | 'L' | 'C' | 'D' | 'M'
+        )
+    {
+        tail_start -= 1;
+    }
+    let tail_len = n - tail_start;
+    if tail_len < 2 || tail_len > 6 {
+        return false;
+    }
+    let mut sep_end = tail_start;
+    let mut saw_ws = false;
+    while sep_end > 0 {
+        let c = chars[sep_end - 1];
+        if c.is_whitespace() {
+            sep_end -= 1;
+            saw_ws = true;
+        } else if c == '.' {
+            sep_end -= 1;
+        } else {
+            break;
+        }
+    }
+    if !saw_ws {
+        return false;
+    }
+    let alpha = chars[..sep_end]
+        .iter()
+        .filter(|c| c.is_alphabetic())
+        .count();
+    alpha >= 5
+}
+
+/// Returns true if `text` is the canonical title of a TOC page: "Contents",
+/// "Table of Contents", "Index", etc. We use this to let the TOC's own title
+/// through the heading promotion that's otherwise suppressed on TOC pages.
+pub(super) fn is_toc_title(text: &str) -> bool {
+    let t = text.trim().trim_end_matches(':').to_ascii_lowercase();
+    matches!(
+        t.as_str(),
+        "contents"
+            | "table of contents"
+            | "table of content"
+            | "index"
+            | "list of figures"
+            | "list of tables"
+            | "table of figures"
+            | "toc"
+    )
+}
+
+/// TOC-page detection. A page is a TOC iff it carries ≥4 arabic-trailing
+/// TOC-entry lines whose page numbers form a *mostly non-decreasing*
+/// sequence (≥70% of adjacent pairs satisfy `next >= prev`). The
+/// monotonicity check is what separates real TOCs from chart/graph pages
+/// with random axis-value tails. Lines whose tail isn't arabic but matches
+/// the looser `looks_like_toc_entry` (e.g. roman numerals "ix", "xi") still
+/// count toward the row floor — they just don't participate in the
+/// monotonicity check.
+pub(super) fn page_is_toc(page: &ParsedPage) -> bool {
+    let mut nums: Vec<i32> = Vec::new();
+    let mut total_toc_like = 0usize;
+    for line in &page.projected_lines {
+        if is_rotated_line(line) {
+            continue;
+        }
+        if let Some(n) = toc_entry_arabic_number(&line.text) {
+            nums.push(n);
+            total_toc_like += 1;
+        } else if looks_like_toc_entry(&line.text) {
+            total_toc_like += 1;
+        }
+    }
+    if total_toc_like < 4 || nums.len() < 3 {
+        return false;
+    }
+    let mut nondec = 0usize;
+    for w in nums.windows(2) {
+        if w[1] >= w[0] {
+            nondec += 1;
+        }
+    }
+    let frac = nondec as f32 / (nums.len() - 1) as f32;
+    frac >= 0.7
+}
+
 /// Returns true if `line` looks like a section heading rendered in body-size
 /// bold text (a very common style for academic / technical PDFs where every
 /// "real" heading uses the same font size as body, distinguished only by
@@ -255,14 +417,20 @@ pub fn compute_body_size(pages: &[ParsedPage]) -> f32 {
 }
 
 /// Minimum total non-whitespace characters across all occurrences at a font
-/// size for it to qualify as a heading level. Calibrated against `paper.pdf`:
-/// the 30pt chart-legend tokens ("A-mem"×2 + "Base"×2 = 18-20 chars) need to
-/// fail this filter, while the 14.35pt title ("A-MEM: Agentic Memory for LLM
-/// Agents" = 31 chars on a single line) needs to pass. 25 is the gap. Smaller
-/// single-word headings like a lone "Summary" on a short doc still survive
-/// because they share their font size with other (larger) headings in the
-/// histogram entry.
-const MIN_HEADING_TOTAL_CHARS: usize = 25;
+/// size for it to qualify as a heading level. Low floor — just a noise guard
+/// against 1-2 char artifacts. The real legend-token discriminator is
+/// `MIN_HEADING_AVG_LINE_CHARS` below.
+const MIN_HEADING_TOTAL_CHARS: usize = 10;
+
+/// Minimum average non-whitespace characters *per line* at a font size for it
+/// to qualify as a heading. This is what separates a real heading (a coherent
+/// line like "Annual Events" = 12 chars/line, or "A-MEM: Agentic Memory for
+/// LLM Agents" = 31) from scattered chart-legend tokens at a one-off display
+/// size (paper.pdf's "A-mem"/"Base" ~ 4-5 chars/line). A per-line average is
+/// robust where a total-char floor was not: a single short-but-real heading
+/// (14pt "Aligning with Your Identity" = 24 non-ws chars, over 10.5pt body)
+/// clears it, while many tiny repeated tokens do not no matter how many.
+const MIN_HEADING_AVG_LINE_CHARS: f32 = 8.0;
 
 /// Maximum average characters per line for a size to qualify as a heading.
 /// A "size larger than body" with very long lines is almost always a
@@ -325,8 +493,10 @@ pub fn build_heading_map(pages: &[ParsedPage], body_size: f32) -> Vec<(f32, u8)>
             } else {
                 (*alpha as f32) / (*chars as f32)
             };
+            let avg_line_chars = *chars as f32 / (*lines).max(1) as f32;
             *chars >= MIN_HEADING_TOTAL_CHARS
-                && (*chars as f32 / (*lines).max(1) as f32) <= MAX_HEADING_AVG_LINE_CHARS
+                && avg_line_chars >= MIN_HEADING_AVG_LINE_CHARS
+                && avg_line_chars <= MAX_HEADING_AVG_LINE_CHARS
                 && alpha_ratio >= MIN_HEADING_ALPHA_RATIO
         })
         .map(|(s, _, _, _)| *s)
@@ -465,6 +635,61 @@ fn normalize_outline_text(s: &str) -> String {
 mod tests {
     use super::super::test_helpers::{line, page};
     use super::*;
+
+    #[test]
+    fn toc_entry_arabic_extracts_trailing_page_number() {
+        assert_eq!(toc_entry_arabic_number("Introduction 7"), Some(7));
+        assert_eq!(
+            toc_entry_arabic_number("1. A Fountain in the Square 1"),
+            Some(1)
+        );
+        assert_eq!(
+            toc_entry_arabic_number("6. For the Love of Iran . . . 41"),
+            Some(41)
+        );
+    }
+
+    #[test]
+    fn toc_entry_arabic_rejects_decimals_and_axis_labels() {
+        // "94.2" → decimal, not a TOC entry
+        assert_eq!(toc_entry_arabic_number("OCR-Recall3 7 94.2"), None);
+        // Chapter 7 — too short an alpha body to be a TOC entry
+        assert_eq!(toc_entry_arabic_number("Chapter 7"), None);
+        // No separator
+        assert_eq!(toc_entry_arabic_number("Section1"), None);
+    }
+
+    #[test]
+    fn is_toc_title_matches_common_variants() {
+        assert!(is_toc_title("Contents"));
+        assert!(is_toc_title("Table of Contents"));
+        assert!(is_toc_title("table of contents"));
+        assert!(is_toc_title("Index"));
+        assert!(!is_toc_title("Introduction"));
+    }
+
+    #[test]
+    fn page_is_toc_requires_monotonic_page_numbers() {
+        // Real TOC: monotonically increasing page numbers.
+        let pages_toc = page(vec![
+            line("Table of contents", 50.0, 30.0, 18.0, 18.0),
+            line("Introduction 7", 50.0, 60.0, 12.0, 12.0),
+            line("Part I: New Children 21", 50.0, 72.0, 12.0, 12.0),
+            line("Part II: From Solitary 45", 50.0, 84.0, 12.0, 12.0),
+            line("Part III: Commercial 71", 50.0, 96.0, 12.0, 12.0),
+            line("Conclusion 127", 50.0, 108.0, 12.0, 12.0),
+        ]);
+        assert!(page_is_toc(&pages_toc));
+
+        // Chart page: trailing numbers but NOT monotonic and many fail the
+        // separator/alpha rules anyway.
+        let pages_chart = page(vec![
+            line("OCR-Recall is 94.2", 50.0, 60.0, 9.0, 9.0),
+            line("Precision rate 89.0", 50.0, 72.0, 9.0, 9.0),
+            line("F1 score 80.4", 50.0, 84.0, 9.0, 9.0),
+        ]);
+        assert!(!page_is_toc(&pages_chart));
+    }
 
     #[test]
     fn body_size_picks_most_common() {

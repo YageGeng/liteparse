@@ -3,7 +3,8 @@ use crate::types::{OutlineTarget, ParsedPage, ProjectedLine};
 use super::blocks::{Block, paragraph_from_accum};
 use super::headings::{
     MAX_HEADING_LEVELS, heading_level_for, is_caption_line, looks_like_bold_heading,
-    looks_like_numbered_bold_heading, outline_heading_level, struct_heading_level,
+    is_toc_title, looks_like_numbered_bold_heading, outline_heading_level, page_is_toc,
+    struct_heading_level,
 };
 use super::hr::detect_horizontal_rules;
 use super::inline::{
@@ -85,6 +86,14 @@ pub fn classify_page_with_filters(
     };
 
     let debug = std::env::var("LITEPARSE_DEBUG_MD").is_ok();
+
+    // TOC suppression: when ≥3 lines on this page look like TOC entries
+    // (alpha body + trailing page-number), demote heading promotion so each
+    // entry stays a paragraph instead of becoming a fake H1/H2. The TOC's
+    // own title ("Contents", "Table of Contents") is shorter without a
+    // trailing number — it falls through the size/bold heuristics with no
+    // special handling needed.
+    let toc_page = page_is_toc(page);
 
     // Strip running header/footer lines up-front so they don't leak into
     // table detection (a repeating two-column footer would otherwise look
@@ -338,13 +347,25 @@ pub fn classify_page_with_filters(
         // distinct (and slightly larger) font that lands them in the
         // font-size heading map. Suppress font-size promotion for them;
         // outline / struct-tree signals still win since those are explicit.
-        let size_level = if is_caption_line(text) {
+        let toc_suppress = toc_page && !is_toc_title(text);
+        let size_level = if is_caption_line(text) || toc_suppress {
             None
         } else {
             heading_level_for(line.dominant_font_size, heading_map)
         };
+        // A standalone "Contents" / "Table of Contents" / "Index" line is
+        // almost always a real H1, even when `page_is_toc` is false — many
+        // TOCs list entries without inline trailing page numbers, so the
+        // page-level detector misses them. `is_toc_title` matches the *entire*
+        // trimmed line against an exact whitelist, so it can't fire mid-prose.
+        let toc_title_level = if is_toc_title(text) {
+            Some(1u8)
+        } else {
+            None
+        };
         let level = outline_level
             .or(size_level)
+            .or(toc_title_level)
             .map(|l| l.clamp(1, MAX_HEADING_LEVELS as u8));
         if let Some(level) = level {
             flush_paragraph(&mut blocks, paragraph.take());
@@ -368,6 +389,7 @@ pub fn classify_page_with_filters(
             // headings in technical/legal/scientific PDFs silently emit as
             // ordered list items and lose all heading structure.
             if ordered
+                && !toc_suppress
                 && looks_like_numbered_bold_heading(
                     line,
                     rest,
@@ -438,7 +460,7 @@ pub fn classify_page_with_filters(
             .map(|p| &p.last)
             .or(last_list_line.as_ref());
         let next_for_gap = lines.get(idx);
-        if looks_like_bold_heading(line, prev_for_gap, next_for_gap) {
+        if !toc_suppress && looks_like_bold_heading(line, prev_for_gap, next_for_gap) {
             flush_paragraph(&mut blocks, paragraph.take());
             list_base_indent = None;
             last_list_item_idx = None;
