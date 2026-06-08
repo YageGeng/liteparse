@@ -63,7 +63,7 @@ jobs:
             node-arch: linux-arm64-gnu
             pdfium-dylib: libpdfium.so
 
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-musl
             node-arch: linux-x64-musl
             pdfium-dylib: libpdfium.so
@@ -113,7 +113,7 @@ jobs:
             ~/Library/Caches/pdfium-rs
             ${{ runner.os == 'Windows' && format('{0}\pdfium-rs', env.LOCALAPPDATA) || '' }}
             target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-node-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.os }}-${{ matrix.target }}-cargo-node-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install dependencies
         working-directory: packages/node
@@ -188,7 +188,7 @@ jobs:
             node-arch: darwin-arm64
           - os: macos-26-intel
             node-arch: darwin-x64
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             node-arch: linux-x64-gnu
           - os: windows-latest
             node-arch: win32-x64-msvc
@@ -281,7 +281,7 @@ jobs:
             ~/.cache/pdfium-rs
             ~/Library/Caches/pdfium-rs
             target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-cli-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.os }}-${{ matrix.target }}-cargo-cli-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build
         run: |
