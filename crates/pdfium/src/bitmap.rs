@@ -29,10 +29,13 @@ impl<'lib> Bitmap<'lib> {
 
     /// Create a new BGRA bitmap with the given dimensions.
     ///
-    /// The caller must hold a [`Library`] for at least `'lib` — this is
-    /// usually inferred from the call site (e.g. returning a `Bitmap<'lib>`
-    /// from a method on `Page<'_, 'lib>`).
-    pub fn new(width: i32, height: i32) -> Result<Self, PdfiumError> {
+    /// # Safety
+    /// The caller must hold a [`Library`] for at least `'lib` (PDFium FFI is
+    /// not thread-safe). `'lib` is not constrained by an argument, so callers
+    /// must ensure it cannot outlive the held lock — usually by inferring it
+    /// from the call site (e.g. returning a `Bitmap<'lib>` from a method on
+    /// `Page<'_, 'lib>`, whose existence already proves the lock is held).
+    pub unsafe fn new(width: i32, height: i32) -> Result<Self, PdfiumError> {
         let handle = unsafe {
             ffi!(FPDFBitmap_CreateEx(
                 width,
