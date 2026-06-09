@@ -393,7 +393,11 @@ fn polygon_rotation_deg(poly: &[[f32; 2]; 4]) -> f32 {
     }
     // Treat near-square polygons as un-rotated — there's no reliable reading
     // axis to pick from. Single-char/CJK detections fall in here.
-    let (longer, shorter) = if len0 >= len1 { (len0, len1) } else { (len1, len0) };
+    let (longer, shorter) = if len0 >= len1 {
+        (len0, len1)
+    } else {
+        (len1, len0)
+    };
     if shorter > 0.0 && longer / shorter < 1.3 {
         return 0.0;
     }
