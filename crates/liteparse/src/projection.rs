@@ -182,6 +182,25 @@ fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f
             continue;
         }
 
+        // Long-span guard: a rotated group whose screen-space extent along its
+        // reading direction spans a large fraction of the page is almost
+        // always sidebar/marginalia (page footers, signature stamps, vertical
+        // disclaimers on legal/scanned docs) — never an inline label. Force the
+        // separate-block branch so it doesn't get flattened onto body lines.
+        //
+        // For 90/270° text the reading direction is screen-vertical, so the
+        // group's vertical screen span is the relevant axis.
+        let group_min_y = group
+            .iter()
+            .map(|idx| items[*idx].item.y)
+            .fold(f32::INFINITY, f32::min);
+        let group_max_y = group
+            .iter()
+            .map(|idx| items[*idx].item.y + items[*idx].item.height)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let group_vspan = (group_max_y - group_min_y).max(0.0);
+        let long_span = page_height > 0.0 && group_vspan > page_height * 0.4;
+
         // Check if non-rotated/other-rotated items visually overlap or are near this group.
         // Use a proximity margin so rotated labels in diagrams (e.g. pin diagrams)
         // that are close to but don't strictly overlap non-rotated items are kept inline.
@@ -210,7 +229,7 @@ fn handle_rotation_reading_order(items: &mut [ProjectedTextItem], page_height: f
             }
         }
 
-        if global_overlap {
+        if global_overlap && !long_span {
             // For 90/270° groups kept inline, compute a common y from the
             // group's average vertical midpoint so all labels land on one row.
             // Keep original w/h to preserve x-spacing between labels.

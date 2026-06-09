@@ -192,10 +192,36 @@ pub(crate) async fn ocr_and_merge_rendered(
                 continue;
             }
 
-            let ocr_x = r.bbox[0] * scale_factor;
-            let ocr_y = r.bbox[1] * scale_factor;
-            let ocr_w = (r.bbox[2] - r.bbox[0]) * scale_factor;
-            let ocr_h = (r.bbox[3] - r.bbox[1]) * scale_factor;
+            // Prefer the screen-space axis-aligned bbox derived from the polygon
+            // (when present) so rotated detections carry a tight upright bbox.
+            // The polygon also lets us recover an explicit rotation angle so the
+            // projector can route rotated sidebar text through its rotation
+            // reading-order handler instead of mistaking it for body text.
+            let (ocr_x, ocr_y, ocr_w, ocr_h, rotation) = match r.polygon {
+                Some(poly) => {
+                    let xs = [poly[0][0], poly[1][0], poly[2][0], poly[3][0]];
+                    let ys = [poly[0][1], poly[1][1], poly[2][1], poly[3][1]];
+                    let x_min = xs.iter().copied().fold(f32::INFINITY, f32::min);
+                    let x_max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let y_min = ys.iter().copied().fold(f32::INFINITY, f32::min);
+                    let y_max = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let rot = polygon_rotation_deg(&poly);
+                    (
+                        x_min * scale_factor,
+                        y_min * scale_factor,
+                        (x_max - x_min) * scale_factor,
+                        (y_max - y_min) * scale_factor,
+                        rot,
+                    )
+                }
+                None => (
+                    r.bbox[0] * scale_factor,
+                    r.bbox[1] * scale_factor,
+                    (r.bbox[2] - r.bbox[0]) * scale_factor,
+                    (r.bbox[3] - r.bbox[1]) * scale_factor,
+                    0.0,
+                ),
+            };
 
             if overlaps_existing_text(
                 &page.text_items[..native_count],
@@ -213,14 +239,25 @@ pub(crate) async fn ocr_and_merge_rendered(
                 continue;
             }
 
+            // For native rotated text the font_size approximates line height,
+            // which for 90/270° rotations corresponds to the *narrow* screen
+            // dimension. Use the perpendicular extent for rotated OCR text so
+            // downstream font-size heuristics stay sane.
+            let font_size_hint = if rotation == 90.0 || rotation == 270.0 {
+                ocr_w.max(1.0)
+            } else {
+                ocr_h
+            };
+
             page.text_items.push(TextItem {
                 text: cleaned,
                 x: ocr_x,
                 y: ocr_y,
                 width: ocr_w,
                 height: ocr_h,
+                rotation,
                 font_name: Some("OCR".to_string()),
-                font_size: Some(ocr_h),
+                font_size: Some(font_size_hint),
                 confidence: Some((r.confidence * 1000.0).round() / 1000.0),
                 ..Default::default()
             });
@@ -334,6 +371,43 @@ fn page_is_garbled(page: &Page) -> bool {
     total_vowels * 5 < total_letters
 }
 
+/// Recover a discrete CCW rotation in degrees from a 4-point OCR polygon.
+/// Returns one of 0.0, 90.0, 180.0, 270.0 — snapping to the nearest right
+/// angle — or 0.0 for nearly-square/degenerate polygons.
+///
+/// Point ordering varies between OCR engines: some emit TL→TR→BR→BL in the
+/// glyphs' upright reading frame (so poly[0]→poly[1] is always the reading
+/// direction), but others (notably PaddleOCR 3.x with
+/// `use_textline_orientation=True`) emit polygons in screen-axis order, where
+/// poly[0]→poly[1] is always horizontal in screen space regardless of how the
+/// text actually reads. To handle both, we pick the *longer* of the two
+/// adjacent edges as the reading direction — the text always runs along the
+/// long axis of its bounding quadrilateral.
+fn polygon_rotation_deg(poly: &[[f32; 2]; 4]) -> f32 {
+    let e0 = [poly[1][0] - poly[0][0], poly[1][1] - poly[0][1]];
+    let e1 = [poly[2][0] - poly[1][0], poly[2][1] - poly[1][1]];
+    let len0 = (e0[0] * e0[0] + e0[1] * e0[1]).sqrt();
+    let len1 = (e1[0] * e1[0] + e1[1] * e1[1]).sqrt();
+    if len0.max(len1) < 1.0 {
+        return 0.0;
+    }
+    // Treat near-square polygons as un-rotated — there's no reliable reading
+    // axis to pick from. Single-char/CJK detections fall in here.
+    let (longer, shorter) = if len0 >= len1 {
+        (len0, len1)
+    } else {
+        (len1, len0)
+    };
+    if shorter > 0.0 && longer / shorter < 1.3 {
+        return 0.0;
+    }
+    let reading = if len0 >= len1 { e0 } else { e1 };
+    // atan2 with screen-down y; negate to get the conventional CCW angle.
+    let angle_ccw = -reading[1].atan2(reading[0]).to_degrees();
+    let normalized = angle_ccw.rem_euclid(360.0);
+    ((normalized / 90.0).round() as i32 * 90).rem_euclid(360) as f32
+}
+
 /// Check if an OCR bounding box overlaps with any existing text item.
 fn overlaps_existing_text(
     items: &[TextItem],
@@ -394,6 +468,50 @@ fn clean_ocr_table_artifacts(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_polygon_rotation_horizontal() {
+        let p = [[0.0, 0.0], [100.0, 0.0], [100.0, 20.0], [0.0, 20.0]];
+        assert_eq!(polygon_rotation_deg(&p), 0.0);
+    }
+
+    #[test]
+    fn test_polygon_rotation_90_ccw() {
+        // Upright text rotated 90° CCW: TL→TR edge points upward (screen y decreasing).
+        let p = [[10.0, 100.0], [10.0, 0.0], [30.0, 0.0], [30.0, 100.0]];
+        assert_eq!(polygon_rotation_deg(&p), 90.0);
+    }
+
+    #[test]
+    fn test_polygon_rotation_270_ccw() {
+        // Upright text rotated 270° CCW (= 90° CW): TL→TR edge points downward.
+        let p = [[10.0, 0.0], [10.0, 100.0], [30.0, 100.0], [30.0, 0.0]];
+        assert_eq!(polygon_rotation_deg(&p), 270.0);
+    }
+
+    #[test]
+    fn test_polygon_rotation_screen_axis_vertical() {
+        // PaddleOCR-style: tall+narrow sidebar polygon in screen-axis order
+        // (smallest-y first). poly[0]→poly[1] is the SHORT horizontal edge,
+        // not the reading direction. The longer edge picks out the rotation.
+        let p = [[20.0, 50.0], [50.0, 50.0], [50.0, 750.0], [20.0, 750.0]];
+        let r = polygon_rotation_deg(&p);
+        assert!(r == 90.0 || r == 270.0, "expected 90 or 270, got {r}");
+    }
+
+    #[test]
+    fn test_polygon_rotation_near_square() {
+        // Single-char detections (CJK glyphs, etc.) should not be classified
+        // as rotated — there's no reliable reading axis.
+        let p = [[0.0, 0.0], [20.0, 0.0], [20.0, 22.0], [0.0, 22.0]];
+        assert_eq!(polygon_rotation_deg(&p), 0.0);
+    }
+
+    #[test]
+    fn test_polygon_rotation_180() {
+        let p = [[100.0, 20.0], [0.0, 20.0], [0.0, 0.0], [100.0, 0.0]];
+        assert_eq!(polygon_rotation_deg(&p), 180.0);
+    }
 
     #[test]
     fn test_clean_ocr_table_artifacts() {

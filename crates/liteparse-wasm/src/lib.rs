@@ -235,6 +235,7 @@ impl OcrEngine for JsOcrEngine {
                     text: r.text,
                     bbox: r.bbox,
                     confidence: r.confidence,
+                    polygon: r.polygon,
                 })
                 .collect())
         })
@@ -246,6 +247,8 @@ struct JsOcrResult {
     text: String,
     bbox: [f32; 4],
     confidence: f32,
+    #[serde(default)]
+    polygon: Option<[[f32; 2]; 4]>,
 }
 
 // ---------------------------------------------------------------------------
