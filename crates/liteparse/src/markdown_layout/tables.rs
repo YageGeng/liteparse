@@ -180,56 +180,14 @@ fn recover_merged_cell(mut cells: Vec<TableCell>, tracks: &[f32]) -> Option<Vec<
         }
         let i = best_i?;
         let cell = cells[i].clone();
-        let chars: Vec<char> = cell.text.trim().chars().collect();
-        let n = chars.len();
-        if n == 0 || best_contained.len() < 2 {
-            return None;
-        }
-        let text_width = (cell.end_x - cell.start_x).max(1.0);
-        // For each track after the first, pick the whitespace boundary in
-        // `chars` whose linearly-interpolated x is closest to the track.
-        let mut split_indices: Vec<usize> = Vec::new();
-        for t in best_contained.iter().skip(1) {
-            let mut best: Option<(usize, f32)> = None;
-            for (k, ch) in chars.iter().enumerate() {
-                if !ch.is_whitespace() {
-                    continue;
-                }
-                if split_indices.contains(&k) {
-                    continue;
-                }
-                let frac = k as f32 / n as f32;
-                let x = cell.start_x + frac * text_width;
-                let d = (x - t).abs();
-                if best.as_ref().is_none_or(|b| d < b.1) {
-                    best = Some((k, d));
-                }
-            }
-            let (k, _) = best?;
-            split_indices.push(k);
-        }
-        split_indices.sort();
-        // Build the split pieces.
-        let mut pieces: Vec<String> = Vec::new();
-        let mut prev = 0usize;
-        for k in &split_indices {
-            let piece: String = chars[prev..*k]
-                .iter()
-                .collect::<String>()
-                .trim()
-                .to_string();
-            if piece.is_empty() {
-                return None;
-            }
-            pieces.push(piece);
-            prev = *k;
-        }
-        let last: String = chars[prev..].iter().collect::<String>().trim().to_string();
-        if last.is_empty() {
-            return None;
-        }
-        pieces.push(last);
-        if pieces.len() != best_contained.len() {
+        // Split the merged cell text at each contained track after the first.
+        let pieces = split_text_at_x_anchors(
+            cell.text.trim(),
+            cell.start_x,
+            cell.end_x - cell.start_x,
+            &best_contained[1..],
+        )?;
+        if pieces.iter().any(|p| p.is_empty()) {
             return None;
         }
         // Synthesize new TableCells aligned with each track.
@@ -561,37 +519,33 @@ fn is_value_like(text: &str) -> bool {
         .any(|w| w[0].is_ascii_digit() && (w[1] == '.' || w[1] == ',') && w[2].is_ascii_digit())
 }
 
-/// Split a multi-track-spanning span's text into one piece per covered track
-/// by picking whitespace positions whose linearly-interpolated x is closest
-/// to each subsequent anchor. Returns `Some(pieces)` of length
-/// `covered.len()` when every split lands on a real whitespace boundary;
-/// `None` if no usable boundary exists (e.g. unbroken text like a long
-/// hex string).
-fn split_span_at_anchors(
-    span: &TextItem,
-    covered: &[usize],
-    tracks: &[f32],
+/// Split `text` (treated as occupying `[x0, x0 + width]`) into
+/// `anchors.len() + 1` trimmed pieces by mapping each anchor x to the
+/// whitespace boundary whose linearly-interpolated x is closest. Returns
+/// `None` if the text is empty, there are no anchors, or any anchor has no
+/// usable whitespace boundary (e.g. unbroken text like a long hex string).
+/// Pieces may be empty strings — callers that require non-empty pieces must
+/// check.
+fn split_text_at_x_anchors(
+    text: &str,
+    x0: f32,
+    width: f32,
+    anchors: &[f32],
 ) -> Option<Vec<String>> {
-    let chars: Vec<char> = span.text.chars().collect();
+    let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
-    if n == 0 || covered.len() < 2 {
+    if n == 0 || anchors.is_empty() {
         return None;
     }
-    let span_x0 = span.x;
-    let span_w = span.width.max(1.0);
+    let w = width.max(1.0);
     let mut split_indices: Vec<usize> = Vec::new();
-    for &idx in covered.iter().skip(1) {
-        let target = tracks[idx];
+    for &target in anchors {
         let mut best: Option<(usize, f32)> = None;
         for (k, ch) in chars.iter().enumerate() {
-            if !ch.is_whitespace() {
+            if !ch.is_whitespace() || split_indices.contains(&k) {
                 continue;
             }
-            if split_indices.contains(&k) {
-                continue;
-            }
-            let frac = k as f32 / n as f32;
-            let x = span_x0 + frac * span_w;
+            let x = x0 + (k as f32 / n as f32) * w;
             let d = (x - target).abs();
             if best.as_ref().is_none_or(|b| d < b.1) {
                 best = Some((k, d));
@@ -603,20 +557,30 @@ fn split_span_at_anchors(
     split_indices.sort();
     let mut pieces: Vec<String> = Vec::new();
     let mut prev = 0usize;
-    for k in &split_indices {
-        let piece: String = chars[prev..*k]
-            .iter()
-            .collect::<String>()
-            .trim()
-            .to_string();
-        pieces.push(piece);
-        prev = *k;
+    for &k in &split_indices {
+        pieces.push(chars[prev..k].iter().collect::<String>().trim().to_string());
+        prev = k;
     }
     pieces.push(chars[prev..].iter().collect::<String>().trim().to_string());
-    if pieces.len() != covered.len() {
+    Some(pieces)
+}
+
+/// Split a multi-track-spanning span's text into one piece per covered track
+/// by picking whitespace positions whose linearly-interpolated x is closest
+/// to each subsequent anchor. Returns `Some(pieces)` of length
+/// `covered.len()` when every split lands on a real whitespace boundary;
+/// `None` if no usable boundary exists (e.g. unbroken text like a long
+/// hex string).
+fn split_span_at_anchors(
+    span: &TextItem,
+    covered: &[usize],
+    tracks: &[f32],
+) -> Option<Vec<String>> {
+    if covered.len() < 2 {
         return None;
     }
-    Some(pieces)
+    let anchors: Vec<f32> = covered[1..].iter().map(|&idx| tracks[idx]).collect();
+    split_text_at_x_anchors(&span.text, span.x, span.width, &anchors)
 }
 
 /// Like `try_detect_table` but seeds column tracks from the union of raw
@@ -627,6 +591,68 @@ fn split_span_at_anchors(
 /// per-row bucketing (no win to be had), or (b) the inferred-track candidate
 /// fails any soundness check — in which case `try_detect_table`'s existing
 /// logic should run.
+/// Shared epilogue for the table detectors. Given the accumulated `rows`, walk
+/// back to absorb wrapped header lines, optionally promote a bold first row to
+/// the header (only when `bold_first_row_eligible` and no header was absorbed),
+/// build the body, and construct the `TableRun`. The bold-eligibility predicate
+/// differs between callers (the inferred path additionally requires non-empty
+/// cells), so it's computed at the call site and passed in.
+fn finalize_table_run(
+    lines: &[ProjectedLine],
+    start_idx: usize,
+    floor: usize,
+    rows: &[(usize, &ProjectedLine, Vec<TableCell>)],
+    track_ranges: &[(f32, f32)],
+    column_count: usize,
+    end: usize,
+    bold_first_row_eligible: bool,
+) -> Option<TableRun> {
+    // Walk back above the detected body and absorb header lines that align to
+    // the same column tracks but weren't includable as body rows (merged /
+    // partial header cells). Multiple wrapped header lines collapse into one
+    // markdown header row, joined per-column top-to-bottom.
+    let absorbed = absorb_header_lines(lines, start_idx, track_ranges, column_count, floor);
+
+    // Promote the first body row to header iff it qualifies and we didn't
+    // already absorb an explicit header above. `row_start` is the index of the
+    // first body row within `rows`: 0 when the header came from absorbed lines,
+    // 1 when the bold-first-row promotion consumes rows[0].
+    let first_row = &rows[0].2;
+    let bold_header_qualifies = absorbed.is_none() && bold_first_row_eligible;
+    let (run_start, header, row_start) = match absorbed {
+        Some((hstart, header_texts)) => (hstart, Some(header_texts), 0),
+        None if bold_header_qualifies => (
+            start_idx,
+            Some(first_row.iter().map(|c| c.text.clone()).collect()),
+            1,
+        ),
+        None => (start_idx, None, 0),
+    };
+    let body_rows: Vec<Vec<String>> = rows[row_start..]
+        .iter()
+        .map(|(_, _, cells)| cells.iter().map(|c| c.text.clone()).collect())
+        .collect();
+    if header.is_none() && body_rows.len() < TABLE_MIN_ROWS {
+        return None;
+    }
+
+    if *super::flags::DEBUG_TABLE {
+        eprintln!(
+            "[tbl-detect @{start_idx}..{end}] cols={column_count} header={header:?} rows={}",
+            body_rows.len()
+        );
+    }
+    Some(TableRun {
+        start: run_start,
+        end,
+        body_start: start_idx,
+        block: Block::Table {
+            header,
+            rows: body_rows,
+        },
+    })
+}
+
 fn try_detect_table_inferred(
     lines: &[ProjectedLine],
     start_idx: usize,
@@ -776,35 +802,17 @@ fn try_detect_table_inferred(
     }
     let end = j;
 
-    let absorbed = absorb_header_lines(lines, start_idx, &track_ranges, column_count, floor);
-    let first_row = &rows[0].2;
-    let bold_header_qualifies =
-        absorbed.is_none() && first_row.iter().all(|c| c.bold && !c.text.is_empty());
-    let (run_start, header, row_start) = match absorbed {
-        Some((hstart, header_texts)) => (hstart, Some(header_texts), 0),
-        None if bold_header_qualifies => (
-            start_idx,
-            Some(first_row.iter().map(|c| c.text.clone()).collect()),
-            1,
-        ),
-        None => (start_idx, None, 0),
-    };
-    let body_rows: Vec<Vec<String>> = rows[row_start..]
-        .iter()
-        .map(|(_, _, cells)| cells.iter().map(|c| c.text.clone()).collect())
-        .collect();
-    if header.is_none() && body_rows.len() < TABLE_MIN_ROWS {
-        return None;
-    }
-    Some(TableRun {
-        start: run_start,
+    let bold_eligible = rows[0].2.iter().all(|c| c.bold && !c.text.is_empty());
+    finalize_table_run(
+        lines,
+        start_idx,
+        floor,
+        &rows,
+        &track_ranges,
+        column_count,
         end,
-        body_start: start_idx,
-        block: Block::Table {
-            header,
-            rows: body_rows,
-        },
-    })
+        bold_eligible,
+    )
 }
 
 /// Try to extend a candidate table starting at `start_idx`. On success returns
@@ -987,53 +995,20 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
         });
     }
 
-    // Walk back above the detected body and absorb header lines that align to
-    // the same column tracks but weren't includable as body rows (merged /
-    // partial header cells). Multiple wrapped header lines collapse into one
-    // markdown header row, joined per-column top-to-bottom.
-    let absorbed = absorb_header_lines(lines, start_idx, &track_ranges, column_count, floor);
-
     // Promote the first body row to header iff every cell in it is bold
     // (matches pymupdf4llm's "bold-or-filled" heuristic; fills require fork
-    // data). Skipped when we already absorbed an explicit header above.
-    let first_row = &rows[0].2;
-    let bold_header_qualifies = absorbed.is_none() && first_row.iter().all(|c| c.bold);
-
-    // `row_start` is the index of the first body row within `rows`. When the
-    // header came from absorbed lines above, every detected row is body data;
-    // only the bold-first-row promotion consumes rows[0].
-    let (run_start, header, row_start) = match absorbed {
-        Some((hstart, header_texts)) => (hstart, Some(header_texts), 0),
-        None if bold_header_qualifies => (
-            start_idx,
-            Some(first_row.iter().map(|c| c.text.clone()).collect()),
-            1,
-        ),
-        None => (start_idx, None, 0),
-    };
-    let body_rows: Vec<Vec<String>> = rows[row_start..]
-        .iter()
-        .map(|(_, _, cells)| cells.iter().map(|c| c.text.clone()).collect())
-        .collect();
-    if header.is_none() && body_rows.len() < TABLE_MIN_ROWS {
-        return None;
-    }
-
-    if *super::flags::DEBUG_TABLE {
-        eprintln!(
-            "[tbl-detect @{start_idx}..{end}] cols={column_count} header={header:?} rows={}",
-            body_rows.len()
-        );
-    }
-    Some(TableRun {
-        start: run_start,
+    // data). Skipped inside `finalize_table_run` when a header was absorbed.
+    let bold_eligible = rows[0].2.iter().all(|c| c.bold);
+    finalize_table_run(
+        lines,
+        start_idx,
+        floor,
+        &rows,
+        &track_ranges,
+        column_count,
         end,
-        body_start: start_idx,
-        block: Block::Table {
-            header,
-            rows: body_rows,
-        },
-    })
+        bold_eligible,
+    )
 }
 
 /// Walk backward from `start_idx` (not below `floor`), pulling in lines whose
