@@ -2527,6 +2527,608 @@ fn find_grid_components(hs: &[HSeg], vs: &[VSeg]) -> Vec<(Vec<usize>, Vec<usize>
     comps
 }
 
+/// Which ruled-table detection pass is running. The global pass reassembles a
+/// grid from page-level graphics (lines arrive in xy_cut leaf order and grid
+/// rules may include short decorative horizontals), so it applies extra
+/// filtering the per-region pass does not need.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuledPass {
+    PerRegion,
+    Global,
+}
+
+/// Filter a vector down to the elements whose `keep` flag is set. `keep` must
+/// be at least as long as `items`.
+fn filter_by<T>(items: Vec<T>, keep: &[bool]) -> Vec<T> {
+    items
+        .into_iter()
+        .zip(keep.iter())
+        .filter(|(_, k)| **k)
+        .map(|(v, _)| v)
+        .collect()
+}
+
+/// The per-cell grids `build_ruled_table` fills, collapses, and reads as one
+/// unit. Bundling them lets the row/column-collapse passes filter every layer
+/// through a single `retain_rows`/`retain_cols` call instead of five parallel
+/// `filter().map().collect()` chains — removing the "forgot to filter one
+/// array" bug class.
+struct CellGrid {
+    /// Rendered cell text (each multi-column span whitespace-split at the
+    /// crossed column boundaries).
+    text: Vec<Vec<String>>,
+    /// Per-cell bold flag — starts `true`, cleared when any non-bold span
+    /// lands in the cell.
+    is_bold: Vec<Vec<bool>>,
+    /// Per-cell "carries text" flag.
+    has_text: Vec<Vec<bool>>,
+    /// Colspan-semantics grid: a span crossing ≥2 column boundaries replicates
+    /// its FULL text into every covered cell instead of being split. Consulted
+    /// only for header-band flattening — a group header like "North America"
+    /// centered over its sub-columns must replicate, while the same geometry in
+    /// a data row is a merged run that should split.
+    repl: Vec<Vec<String>>,
+    /// Per-row flag: the row contains an alpha-dominant multi-column span (a
+    /// group-header label, as opposed to a mostly-digit merged data run).
+    row_alpha_spanner: Vec<bool>,
+}
+
+impl CellGrid {
+    fn new(n_rows: usize, n_cols: usize) -> Self {
+        CellGrid {
+            text: vec![vec![String::new(); n_cols]; n_rows],
+            is_bold: vec![vec![true; n_cols]; n_rows],
+            has_text: vec![vec![false; n_cols]; n_rows],
+            repl: vec![vec![String::new(); n_cols]; n_rows],
+            row_alpha_spanner: vec![false; n_rows],
+        }
+    }
+
+    fn n_rows(&self) -> usize {
+        self.text.len()
+    }
+
+    fn n_cols(&self) -> usize {
+        self.text.first().map(|r| r.len()).unwrap_or(0)
+    }
+
+    /// Append trimmed text to a cell, marking it as text-bearing. No-op for
+    /// blank input.
+    fn push_text(&mut self, row: usize, col: usize, txt: &str) {
+        let txt = txt.trim();
+        if txt.is_empty() {
+            return;
+        }
+        if !self.text[row][col].is_empty() {
+            self.text[row][col].push(' ');
+        }
+        self.text[row][col].push_str(txt);
+        self.has_text[row][col] = true;
+    }
+
+    /// Append trimmed text to the colspan-semantics (`repl`) cell. No-op for
+    /// blank input.
+    fn push_repl(&mut self, row: usize, col: usize, txt: &str) {
+        let txt = txt.trim();
+        if txt.is_empty() {
+            return;
+        }
+        let dst = &mut self.repl[row][col];
+        if !dst.is_empty() {
+            dst.push(' ');
+        }
+        dst.push_str(txt);
+    }
+
+    /// Keep only rows `r` where `keep[r]`; every layer filters identically.
+    fn retain_rows(&mut self, keep: &[bool]) {
+        self.text = filter_by(std::mem::take(&mut self.text), keep);
+        self.is_bold = filter_by(std::mem::take(&mut self.is_bold), keep);
+        self.has_text = filter_by(std::mem::take(&mut self.has_text), keep);
+        self.repl = filter_by(std::mem::take(&mut self.repl), keep);
+        self.row_alpha_spanner = filter_by(std::mem::take(&mut self.row_alpha_spanner), keep);
+    }
+
+    /// Keep only columns `c` where `keep[c]`; the per-cell layers filter, the
+    /// per-row `row_alpha_spanner` is unaffected.
+    fn retain_cols(&mut self, keep: &[bool]) {
+        self.text = std::mem::take(&mut self.text)
+            .into_iter()
+            .map(|row| filter_by(row, keep))
+            .collect();
+        self.is_bold = std::mem::take(&mut self.is_bold)
+            .into_iter()
+            .map(|row| filter_by(row, keep))
+            .collect();
+        self.has_text = std::mem::take(&mut self.has_text)
+            .into_iter()
+            .map(|row| filter_by(row, keep))
+            .collect();
+        self.repl = std::mem::take(&mut self.repl)
+            .into_iter()
+            .map(|row| filter_by(row, keep))
+            .collect();
+    }
+
+    /// Drop "phantom rows" produced by stacked thin border-strip rects (doc 149
+    /// rules each visual row as top-strip ~1pt / body ~22pt / bottom-strip ~5pt,
+    /// each surviving the 2pt clustering as its own grid row). A row is dropped
+    /// iff it has no text in any cell AND its height is < 80% of the median
+    /// non-empty row height — the height gate preserves real fill-in-the-blank
+    /// forms whose empty body rows are full height. `ys` are the row boundaries
+    /// (length `n_rows + 1`). Returns the kept rows' heights.
+    fn collapse_phantom_rows(&mut self, ys: &[f32]) -> Vec<f32> {
+        let n_rows = self.n_rows();
+        let row_heights: Vec<f32> = (0..n_rows).map(|r| ys[r + 1] - ys[r]).collect();
+        let nonempty_heights: Vec<f32> = (0..n_rows)
+            .filter(|r| self.has_text[*r].iter().any(|t| *t))
+            .map(|r| row_heights[r])
+            .collect();
+        let median_h = if !nonempty_heights.is_empty() {
+            let mut s = nonempty_heights.clone();
+            s.sort_by(|a, b| a.total_cmp(b));
+            s[s.len() / 2]
+        } else {
+            let mut s = row_heights.clone();
+            s.sort_by(|a, b| a.total_cmp(b));
+            s[s.len() / 2]
+        };
+        let keep: Vec<bool> = (0..n_rows)
+            .map(|r| {
+                let has_text = self.has_text[r].iter().any(|t| *t);
+                has_text || row_heights[r] >= median_h * 0.8
+            })
+            .collect();
+        let kept_row_heights: Vec<f32> = (0..n_rows)
+            .filter(|r| keep[*r])
+            .map(|r| row_heights[r])
+            .collect();
+        self.retain_rows(&keep);
+        kept_row_heights
+    }
+
+    /// Mirror `collapse_phantom_rows` on columns: some ruled tables (doc 149)
+    /// draw left/right borders as thin strip rects ~5pt wide, which become
+    /// phantom text-less columns. Drop a column iff it is both empty AND
+    /// narrower than 30% of the median text-bearing column. `xs` are the column
+    /// boundaries (length `n_cols + 1`).
+    fn collapse_phantom_cols(&mut self, xs: &[f32]) {
+        let n_rows = self.n_rows();
+        let n_cols = self.n_cols();
+        let col_widths: Vec<f32> = (0..n_cols).map(|c| xs[c + 1] - xs[c]).collect();
+        let nonempty_col_widths: Vec<f32> = (0..n_cols)
+            .filter(|c| (0..n_rows).any(|r| self.has_text[r][*c]))
+            .map(|c| col_widths[c])
+            .collect();
+        let median_w = if !nonempty_col_widths.is_empty() {
+            let mut s = nonempty_col_widths.clone();
+            s.sort_by(|a, b| a.total_cmp(b));
+            s[s.len() / 2]
+        } else {
+            let mut s = col_widths.clone();
+            s.sort_by(|a, b| a.total_cmp(b));
+            s[s.len() / 2]
+        };
+        let keep_col: Vec<bool> = (0..n_cols)
+            .map(|c| {
+                let has_text = (0..n_rows).any(|r| self.has_text[r][c]);
+                has_text || col_widths[c] >= median_w * 0.3
+            })
+            .collect();
+        self.retain_cols(&keep_col);
+    }
+}
+
+/// Bin each line's text into the grid cells defined by column boundaries `xs`
+/// and row boundaries `ys`. A projected line frequently spans several ruled
+/// columns (one baseline = one line), so binning whole lines by centroid would
+/// lump an entire row into one cell and leave the rest empty — the empty-cell
+/// filter would then reject the real table. Instead bin each line's raw spans
+/// by span center; spans whose x-extent crosses one or more interior column
+/// boundaries are split at the whitespace nearest each crossed boundary (same
+/// interpolation as the inferred-track path). Returns the filled grid and the
+/// consumed line indices, or `None` if no line landed inside the grid or too
+/// many spans straddle interior boundaries (a decorative box over prose, not a
+/// table).
+fn assign_cells(
+    lines: &[ProjectedLine],
+    xs: &[f32],
+    ys: &[f32],
+    dbg: bool,
+) -> Option<(CellGrid, Vec<usize>)> {
+    let n_rows = ys.len() - 1;
+    let n_cols = xs.len() - 1;
+    let mut grid = CellGrid::new(n_rows, n_cols);
+    let mut consumed_indices: Vec<usize> = Vec::new();
+    const GRID_X_SLACK_PT: f32 = 6.0;
+    // Straddle census: spans that cross an interior column boundary by a
+    // clear margin on both sides. A real ruled table keeps text inside cells
+    // (the occasional PDFium merged run aside); decorative slide/layout boxes
+    // over flowing prose slice through most runs (doc 198, a TOC slide).
+    const STRADDLE_MARGIN_PT: f32 = 3.0;
+    let mut span_total = 0usize;
+    let mut span_straddle = 0usize;
+
+    // Iterate lines top-to-bottom. The global pass receives lines in xy_cut
+    // leaf order (column-by-column), which scrambles a multi-line cell's text
+    // when concatenated in array order; y-sorted iteration restores reading
+    // order within each cell. Per-region lines are already y-ordered, so this
+    // is a no-op there.
+    let mut line_order: Vec<usize> = (0..lines.len()).collect();
+    line_order.sort_by(|&a, &b| lines[a].bbox.y.total_cmp(&lines[b].bbox.y));
+    for idx in line_order {
+        let line = &lines[idx];
+        let cy = line.bbox.y + line.bbox.height * 0.5;
+        if cy < ys[0] || cy > ys[n_rows] {
+            continue;
+        }
+        // Line-level row bucket. Used by the no-spans fallback and as the
+        // default when a span's own y doesn't resolve. Spans bin by their own
+        // baseline below — a projected line can merge text from several ruled
+        // rows (e.g. a multi-baseline wrapped header emitted as one line).
+        let row = match find_bucket(ys, cy) {
+            Some(r) => r,
+            None => continue,
+        };
+        if line.text.trim().is_empty() {
+            continue;
+        }
+
+        // Only consume the line when its text sits inside the grid
+        // horizontally — a line poking past the grid edge belongs (at least
+        // partly) to surrounding prose, and consuming it would lose text.
+        let line_x0 = line.bbox.x;
+        let line_x1 = line.bbox.x + line.bbox.width;
+        if line_x0 < xs[0] - GRID_X_SLACK_PT || line_x1 > xs[n_cols] + GRID_X_SLACK_PT {
+            if dbg {
+                eprintln!(
+                    "[ruled]   skip-overhang row={row} x={line_x0:.0}..{line_x1:.0} grid={:.0}..{:.0} text={:?}",
+                    xs[0],
+                    xs[n_cols],
+                    &line.text.chars().take(60).collect::<String>()
+                );
+            }
+            continue;
+        }
+
+        let mut text_spans: Vec<&TextItem> = line
+            .spans
+            .iter()
+            .filter(|s| !s.text.trim().is_empty())
+            .collect();
+        text_spans.sort_by(|a, b| a.x.total_cmp(&b.x));
+
+        if text_spans.is_empty() {
+            // No raw text spans (synthetic/OCR lines): old whole-line centroid path.
+            let cx = line.bbox.x + line.bbox.width * 0.5;
+            if let Some(col) = find_bucket(xs, cx.clamp(xs[0], xs[n_cols])) {
+                grid.push_text(row, col, &line.text);
+                grid.push_repl(row, col, &line.text);
+                if !line.all_bold {
+                    grid.is_bold[row][col] = false;
+                }
+                consumed_indices.push(idx);
+            }
+            continue;
+        }
+
+        for span in text_spans {
+            // Per-span row: a span carries its own baseline y, which may sit
+            // in a different ruled row than the line centroid.
+            let span_cy = span.y + span.height * 0.5;
+            let row = find_bucket(ys, span_cy.clamp(ys[0], ys[n_rows])).unwrap_or(row);
+            let sx0 = (span.x).clamp(xs[0], xs[n_cols]);
+            let sx1 = (span.x + span.width).clamp(xs[0], xs[n_cols]);
+            let c_lo = find_bucket(xs, sx0).unwrap_or(0);
+            let c_hi = find_bucket(xs, sx1).unwrap_or(n_cols - 1);
+            span_total += 1;
+            {
+                let m0 = (span.x + STRADDLE_MARGIN_PT).clamp(xs[0], xs[n_cols]);
+                let m1 = (span.x + span.width - STRADDLE_MARGIN_PT).clamp(xs[0], xs[n_cols]);
+                if m1 > m0 && find_bucket(xs, m0) != find_bucket(xs, m1) {
+                    span_straddle += 1;
+                }
+            }
+            if c_lo == c_hi {
+                grid.push_text(row, c_lo, &span.text);
+                grid.push_repl(row, c_lo, &span.text);
+                if !line.all_bold {
+                    grid.is_bold[row][c_lo] = false;
+                }
+                continue;
+            }
+            // Multi-column span: replicate the full text into every covered
+            // cell of the colspan-semantics grid, and flag the row when the
+            // label is alpha-dominant (group headers are words; merged data
+            // runs are mostly digits).
+            for col in c_lo..=c_hi {
+                grid.push_repl(row, col, &span.text);
+            }
+            if is_alpha_dominant(&span.text) {
+                grid.row_alpha_spanner[row] = true;
+            }
+            // Span crosses interior boundaries: split at the whitespace
+            // nearest each crossed boundary x (xs[k] is column k's left
+            // boundary, which is exactly the split target).
+            let covered: Vec<usize> = (c_lo..=c_hi).collect();
+            if let Some(pieces) = split_span_at_anchors(span, &covered, xs) {
+                for (k, piece) in pieces.iter().enumerate() {
+                    grid.push_text(row, c_lo + k, piece);
+                    if !line.all_bold {
+                        grid.is_bold[row][c_lo + k] = false;
+                    }
+                }
+            } else {
+                // No whitespace to split on — assign whole span by center.
+                let cx = (span.x + span.width * 0.5).clamp(xs[0], xs[n_cols]);
+                if let Some(col) = find_bucket(xs, cx) {
+                    grid.push_text(row, col, &span.text);
+                    if !line.all_bold {
+                        grid.is_bold[row][col] = false;
+                    }
+                }
+            }
+        }
+        consumed_indices.push(idx);
+    }
+
+    if consumed_indices.is_empty() {
+        if dbg {
+            eprintln!("[ruled]   REJECT no-lines-consumed");
+        }
+        return None;
+    }
+
+    let straddle_frac = if span_total > 0 {
+        span_straddle as f32 / span_total as f32
+    } else {
+        0.0
+    };
+    if dbg {
+        eprintln!("[ruled]   straddle {span_straddle}/{span_total} = {straddle_frac:.2}");
+    }
+    if span_total >= 6 && straddle_frac > 0.45 && !*super::flags::DISABLE_STRADDLE_GUARD {
+        if dbg {
+            eprintln!("[ruled]   REJECT straddle-frac {straddle_frac:.2}");
+        }
+        return None;
+    }
+
+    Some((grid, consumed_indices))
+}
+
+/// Colspan header-band flattening (Mode 5 / TRM): a sparse top row whose alpha
+/// spanning label covers several columns ("North America" over its
+/// Revenue/Units sub-columns) followed by a dense label row is a stacked
+/// header. Flatten rows `0..=b` from the colspan-semantics (`repl`) grid into
+/// one header row (per-column top-to-bottom join), so each column carries its
+/// full layer chain ("North America Revenue") — that chain is what header-keyed
+/// evals (and readers) need. Returns `(header_row, body_start)` or `None`.
+fn flatten_header_band(
+    cells: &[Vec<String>],
+    cell_has_text: &[Vec<bool>],
+    cells_repl: &[Vec<String>],
+    row_alpha_spanner: &[bool],
+    n_rows: usize,
+    n_cols: usize,
+    dbg: bool,
+) -> Option<(Vec<String>, usize)> {
+    let row_fill =
+        |r: usize| cell_has_text[r].iter().filter(|t| **t).count() as f32 / n_cols as f32;
+    (0..n_rows)
+        .find(|r| row_fill(*r) >= TABLE_ROW_MIN_FILL)
+        .and_then(|b| {
+            let nonempty = cell_has_text[b].iter().filter(|t| **t).count();
+            let alpha_cells = (0..n_cols)
+                .filter(|c| cell_has_text[b][*c] && is_alpha_dominant(&cells[b][*c]))
+                .count();
+            // The bottom header layer may carry digit labels (years like
+            // "2024") but never measurement values. A decimal / % / $ /
+            // dash-placeholder / comma-grouped number in the anchor row means
+            // it's the first DATA row of a table whose real header just
+            // missed the 0.9-fill anchor (colspan header covering <90% of
+            // columns) — folding it would eat a data row (DS5795A_page4).
+            let has_value_cell =
+                (0..n_cols).any(|c| cell_has_text[b][c] && is_value_like(&cells[b][c]));
+            let qualifies = (1..=3).contains(&b)
+                && b + 1 < n_rows
+                && (0..b).any(|r| row_alpha_spanner[r])
+                && alpha_cells * 2 >= nonempty
+                && !has_value_cell;
+            if !qualifies {
+                return None;
+            }
+            let header: Vec<String> = (0..n_cols)
+                .map(|c| {
+                    let mut parts: Vec<&str> = Vec::new();
+                    for row in cells_repl.iter().take(b + 1) {
+                        let s = row[c].as_str();
+                        if s.is_empty() || parts.last() == Some(&s) {
+                            continue;
+                        }
+                        parts.push(s);
+                    }
+                    parts.join(" ")
+                })
+                .collect();
+            if header.iter().all(|h| h.is_empty()) {
+                return None;
+            }
+            if dbg {
+                eprintln!("[ruled]   colspan header flatten: rows 0..={b} -> {header:?}");
+            }
+            Some((header, b + 1))
+        })
+}
+
+/// Stacked-header merge (Mode 5): some generators rule every text baseline of a
+/// wrapped header cell, slicing one logical header row into several thin sparse
+/// rows ("Rated" / "Voltage" / "(VDC)" each in its own band). When the top
+/// `k ≥ 2` rows are individually sparse but their union covers most columns AND
+/// a dense data row follows, collapse them into a single header row (per-column
+/// top-to-bottom join). `flattened` is whether `flatten_header_band` already
+/// fired (the two are mutually exclusive). Returns the possibly-merged grid
+/// plus a flag for whether the merge happened.
+#[allow(clippy::type_complexity)]
+fn merge_stacked_header(
+    cells: Vec<Vec<String>>,
+    cell_has_text: Vec<Vec<bool>>,
+    cell_is_bold: Vec<Vec<bool>>,
+    n_rows: usize,
+    n_cols: usize,
+    kept_row_heights: &[f32],
+    flattened: bool,
+    dbg: bool,
+) -> (
+    Vec<Vec<String>>,
+    Vec<Vec<bool>>,
+    Vec<Vec<bool>>,
+    usize,
+    bool,
+) {
+    let row_fill =
+        |r: usize, has: &[Vec<bool>]| has[r].iter().filter(|t| **t).count() as f32 / n_cols as f32;
+    // Anchor on the first fully-dense row (the first real data row).
+    let k = (0..n_rows)
+        .find(|r| row_fill(*r, &cell_has_text) >= TABLE_ROW_MIN_FILL)
+        .unwrap_or(0);
+    let union_cols = (0..n_cols)
+        .filter(|c| (0..k).any(|r| cell_has_text[r][*c]))
+        .count();
+    // Tightness: the band rows must be noticeably shorter than the data
+    // rows below — ruled-per-baseline header bands sit at text leading
+    // (~7pt) while real rows carry cell padding. Without this, a table
+    // whose first body rows are legitimately sparse would get merged.
+    let band_tight = if k >= 2 && k < kept_row_heights.len() {
+        let mut below: Vec<f32> = kept_row_heights[k..].to_vec();
+        below.sort_by(|a, b| a.total_cmp(b));
+        let median_below = below[below.len() / 2];
+        kept_row_heights[..k]
+            .iter()
+            .all(|h| *h <= 0.75 * median_below)
+    } else {
+        false
+    };
+    if flattened || k < 2 || k >= n_rows || !band_tight || (union_cols as f32) < 0.7 * n_cols as f32
+    {
+        return (cells, cell_has_text, cell_is_bold, n_rows, false);
+    }
+    if dbg {
+        eprintln!("[ruled]   stacked-header merge: top {k} rows → 1");
+    }
+    let mut merged_row = vec![String::new(); n_cols];
+    let mut merged_has = vec![false; n_cols];
+    let mut merged_bold = vec![true; n_cols];
+    for r in 0..k {
+        for c in 0..n_cols {
+            if cell_has_text[r][c] {
+                if !merged_row[c].is_empty() {
+                    merged_row[c].push(' ');
+                }
+                merged_row[c].push_str(&cells[r][c]);
+                merged_has[c] = true;
+                if !cell_is_bold[r][c] {
+                    merged_bold[c] = false;
+                }
+            }
+        }
+    }
+    let mut new_cells = vec![merged_row];
+    let mut new_has = vec![merged_has];
+    let mut new_bold = vec![merged_bold];
+    new_cells.extend(cells[k..].iter().cloned());
+    new_has.extend(cell_has_text[k..].iter().cloned());
+    new_bold.extend(cell_is_bold[k..].iter().cloned());
+    let nr = new_cells.len();
+    (new_cells, new_has, new_bold, nr, true)
+}
+
+/// Density gate: a grid that is mostly empty cells is rejected unless it shows
+/// strong table evidence. Three escape hatches keep real tables:
+/// - **col0 spine**: a filled, short-text first column (a label column).
+/// - **long-prose table**: a large (≥5×3) grid with a bold header band covering
+///   ≥3 columns and a dense (≥70%-fill) inner description column — a
+///   multi-line legal/reference table whose description wraps over many empty
+///   continuation rows (docs 088/089/090).
+/// - **flattened header**: a fired colspan header flatten is table evidence on
+///   par with a spine.
+/// With a spine but above the higher WITH_SPINE ceiling, still reject (unless a
+/// long-prose table). `flattened` is whether `flatten_header_band` fired.
+/// Returns `true` to keep the table, `false` to reject it.
+fn passes_density_gate(
+    cells: &[Vec<String>],
+    cell_has_text: &[Vec<bool>],
+    cell_is_bold: &[Vec<bool>],
+    n_rows: usize,
+    n_cols: usize,
+    flattened: bool,
+    dbg: bool,
+) -> bool {
+    let total = n_rows * n_cols;
+    let empty_count = cell_has_text
+        .iter()
+        .flatten()
+        .filter(|filled| !**filled)
+        .count();
+    let empty_frac = (empty_count as f32) / (total as f32);
+    if empty_frac <= TABLE_MAX_EMPTY_CELL_FRACTION {
+        return true;
+    }
+    let col0_fill = (0..n_rows).filter(|r| cell_has_text[*r][0]).count() as f32 / n_rows as f32;
+    let col0_max_chars = (0..n_rows)
+        .filter(|r| cell_has_text[*r][0])
+        .map(|r| cells[r][0].len())
+        .max()
+        .unwrap_or(0);
+    let col0_spine =
+        col0_fill >= TABLE_SPINE_FILL_FRACTION && col0_max_chars <= TABLE_SPINE_MAX_CELL_CHARS;
+    // Header may span multiple visual rows (the grid detector slices on each
+    // text baseline). Treat the first ≤4 rows as the header band and require
+    // their *union* to cover most columns AND be all-bold.
+    let header_band = n_rows.min(4);
+    let mut header_cols_covered = vec![false; n_cols];
+    let mut header_all_bold = true;
+    for r in 0..header_band {
+        for c in 0..n_cols {
+            if cell_has_text[r][c] {
+                header_cols_covered[c] = true;
+                if !cell_is_bold[r][c] {
+                    header_all_bold = false;
+                }
+            }
+        }
+    }
+    let header_coverage = header_cols_covered.iter().filter(|t| **t).count();
+    let dense_inner_col = (1..n_cols).any(|c| {
+        let col_fill = (0..n_rows).filter(|r| cell_has_text[*r][c]).count() as f32 / n_rows as f32;
+        col_fill >= TABLE_SPINE_FILL_FRACTION
+    });
+    // Header coverage doesn't need to span every column — wide-cell legal
+    // tables often spread the header across many visual baselines and only a
+    // few columns land in the top-4-rows band. Require ≥3 columns covered as
+    // evidence of a real header, not just a title.
+    let long_prose_table =
+        n_rows >= 5 && n_cols >= 3 && header_coverage >= 3 && header_all_bold && dense_inner_col;
+    if !col0_spine && !long_prose_table && !flattened {
+        if dbg {
+            let fills: Vec<usize> = (0..n_rows)
+                .map(|r| cell_has_text[r].iter().filter(|t| **t).count())
+                .collect();
+            eprintln!(
+                "[ruled]   REJECT empty-frac {empty_frac:.2} ({n_rows}x{n_cols}, no spine/long-prose) row_fills={fills:?}"
+            );
+        }
+        return false;
+    }
+    if empty_frac > TABLE_MAX_EMPTY_CELL_FRACTION_WITH_SPINE && !long_prose_table {
+        if dbg {
+            eprintln!("[ruled]   REJECT empty-frac-with-spine {empty_frac:.2}");
+        }
+        return false;
+    }
+    true
+}
+
 /// Build a `TableRun` for one ruled-grid component. Returns `None` if the
 /// resulting grid is too small (< 2 cols or < 2 rows), covers nearly the
 /// whole page (likely the page border), or is mostly empty cells.
@@ -2538,7 +3140,7 @@ fn build_ruled_table(
     lines: &[ProjectedLine],
     page_width: f32,
     page_height: f32,
-    global: bool,
+    pass: RuledPass,
 ) -> Option<(TableRun, Vec<usize>)> {
     let dbg = *super::flags::DEBUG_RULED;
     let mut xs: Vec<f32> = v_indices.iter().map(|&i| vs[i].x).collect();
@@ -2557,7 +3159,7 @@ fn build_ruled_table(
         dedup_close(&mut v, TABLE_GRID_CLUSTER_PT);
         v
     };
-    let ys: Vec<f32> = if global && xs.len() >= 2 {
+    let ys: Vec<f32> = if pass == RuledPass::Global && xs.len() >= 2 {
         let col_lo = xs[0];
         let col_hi = xs[xs.len() - 1];
         let extent = (col_hi - col_lo).max(1.0);
@@ -2624,338 +3226,26 @@ fn build_ruled_table(
         }
     }
 
-    // Assign text to cells. A projected line frequently spans several ruled
-    // columns (one baseline = one line), so binning whole lines by centroid
-    // lumps an entire row into one cell and leaves the rest empty — the
-    // empty-cell filter then rejects the real table. Instead bin each line's
-    // raw spans by span center; spans whose x-extent crosses one or more
-    // interior column boundaries are split at the whitespace nearest each
-    // crossed boundary (same interpolation as the inferred-track path).
-    let mut cells: Vec<Vec<String>> = vec![vec![String::new(); n_cols]; n_rows];
-    let mut cell_is_bold: Vec<Vec<bool>> = vec![vec![true; n_cols]; n_rows];
-    let mut cell_has_text: Vec<Vec<bool>> = vec![vec![false; n_cols]; n_rows];
-    // Parallel grid where a span crossing ≥2 column boundaries contributes
-    // its FULL text to every covered cell (colspan semantics) instead of the
-    // whitespace split. Only consulted for header-band flattening — a group
-    // header like "North America" centered over its Revenue/Units sub-columns
-    // must replicate, while the same geometry in a data row is a merged run
-    // that should split.
-    let mut cells_repl: Vec<Vec<String>> = vec![vec![String::new(); n_cols]; n_rows];
-    let mut row_alpha_spanner: Vec<bool> = vec![false; n_rows];
-    let mut consumed_indices: Vec<usize> = Vec::new();
-    const GRID_X_SLACK_PT: f32 = 6.0;
-    // Straddle census: spans that cross an interior column boundary by a
-    // clear margin on both sides. A real ruled table keeps text inside cells
-    // (the occasional PDFium merged run aside); decorative slide/layout boxes
-    // over flowing prose slice through most runs (doc 198, a TOC slide).
-    const STRADDLE_MARGIN_PT: f32 = 3.0;
-    let mut span_total = 0usize;
-    let mut span_straddle = 0usize;
+    // Assign text to cells, then reject if no lines landed inside the grid or
+    // too many spans straddle interior column boundaries (decorative box, not
+    // a table).
+    let (mut grid, consumed_indices) = assign_cells(lines, &xs, &ys, dbg)?;
 
-    let push_cell = |cells: &mut Vec<Vec<String>>,
-                     cell_has_text: &mut Vec<Vec<bool>>,
-                     row: usize,
-                     col: usize,
-                     txt: &str| {
-        let txt = txt.trim();
-        if txt.is_empty() {
-            return;
-        }
-        if !cells[row][col].is_empty() {
-            cells[row][col].push(' ');
-        }
-        cells[row][col].push_str(txt);
-        cell_has_text[row][col] = true;
-    };
-
-    // Iterate lines top-to-bottom. The global pass receives lines in xy_cut
-    // leaf order (column-by-column), which scrambles a multi-line cell's text
-    // when concatenated in array order; y-sorted iteration restores reading
-    // order within each cell. Per-region lines are already y-ordered, so this
-    // is a no-op there.
-    let mut line_order: Vec<usize> = (0..lines.len()).collect();
-    line_order.sort_by(|&a, &b| lines[a].bbox.y.total_cmp(&lines[b].bbox.y));
-    for idx in line_order {
-        let line = &lines[idx];
-        let cy = line.bbox.y + line.bbox.height * 0.5;
-        if cy < ys[0] || cy > ys[n_rows] {
-            continue;
-        }
-        // Line-level row bucket. Used by the no-spans fallback and as the
-        // default when a span's own y doesn't resolve. Spans bin by their own
-        // baseline below — a projected line can merge text from several ruled
-        // rows (e.g. a multi-baseline wrapped header emitted as one line).
-        let row = match find_bucket(&ys, cy) {
-            Some(r) => r,
-            None => continue,
-        };
-        if line.text.trim().is_empty() {
-            continue;
-        }
-
-        // Only consume the line when its text sits inside the grid
-        // horizontally — a line poking past the grid edge belongs (at least
-        // partly) to surrounding prose, and consuming it would lose text.
-        let line_x0 = line.bbox.x;
-        let line_x1 = line.bbox.x + line.bbox.width;
-        if line_x0 < xs[0] - GRID_X_SLACK_PT || line_x1 > xs[n_cols] + GRID_X_SLACK_PT {
-            if dbg {
-                eprintln!(
-                    "[ruled]   skip-overhang row={row} x={line_x0:.0}..{line_x1:.0} grid={:.0}..{:.0} text={:?}",
-                    xs[0],
-                    xs[n_cols],
-                    &line.text.chars().take(60).collect::<String>()
-                );
-            }
-            continue;
-        }
-
-        let mut text_spans: Vec<&TextItem> = line
-            .spans
-            .iter()
-            .filter(|s| !s.text.trim().is_empty())
-            .collect();
-        text_spans.sort_by(|a, b| a.x.total_cmp(&b.x));
-        let push_repl = |cells_repl: &mut Vec<Vec<String>>, row: usize, col: usize, txt: &str| {
-            let txt = txt.trim();
-            if txt.is_empty() {
-                return;
-            }
-            let dst = &mut cells_repl[row][col];
-            if !dst.is_empty() {
-                dst.push(' ');
-            }
-            dst.push_str(txt);
-        };
-
-        if text_spans.is_empty() {
-            // No raw text spans (synthetic/OCR lines): old whole-line centroid path.
-            let cx = line.bbox.x + line.bbox.width * 0.5;
-            if let Some(col) = find_bucket(&xs, cx.clamp(xs[0], xs[n_cols])) {
-                push_cell(&mut cells, &mut cell_has_text, row, col, &line.text);
-                push_repl(&mut cells_repl, row, col, &line.text);
-                if !line.all_bold {
-                    cell_is_bold[row][col] = false;
-                }
-                consumed_indices.push(idx);
-            }
-            continue;
-        }
-
-        for span in text_spans {
-            // Per-span row: a span carries its own baseline y, which may sit
-            // in a different ruled row than the line centroid.
-            let span_cy = span.y + span.height * 0.5;
-            let row = find_bucket(&ys, span_cy.clamp(ys[0], ys[n_rows])).unwrap_or(row);
-            let sx0 = (span.x).clamp(xs[0], xs[n_cols]);
-            let sx1 = (span.x + span.width).clamp(xs[0], xs[n_cols]);
-            let c_lo = find_bucket(&xs, sx0).unwrap_or(0);
-            let c_hi = find_bucket(&xs, sx1).unwrap_or(n_cols - 1);
-            span_total += 1;
-            {
-                let m0 = (span.x + STRADDLE_MARGIN_PT).clamp(xs[0], xs[n_cols]);
-                let m1 = (span.x + span.width - STRADDLE_MARGIN_PT).clamp(xs[0], xs[n_cols]);
-                if m1 > m0 && find_bucket(&xs, m0) != find_bucket(&xs, m1) {
-                    span_straddle += 1;
-                }
-            }
-            if c_lo == c_hi {
-                push_cell(&mut cells, &mut cell_has_text, row, c_lo, &span.text);
-                push_repl(&mut cells_repl, row, c_lo, &span.text);
-                if !line.all_bold {
-                    cell_is_bold[row][c_lo] = false;
-                }
-                continue;
-            }
-            // Multi-column span: replicate the full text into every covered
-            // cell of the colspan-semantics grid, and flag the row when the
-            // label is alpha-dominant (group headers are words; merged data
-            // runs are mostly digits).
-            for col in c_lo..=c_hi {
-                push_repl(&mut cells_repl, row, col, &span.text);
-            }
-            if is_alpha_dominant(&span.text) {
-                row_alpha_spanner[row] = true;
-            }
-            // Span crosses interior boundaries: split at the whitespace
-            // nearest each crossed boundary x (xs[k] is column k's left
-            // boundary, which is exactly the split target).
-            let covered: Vec<usize> = (c_lo..=c_hi).collect();
-            if let Some(pieces) = split_span_at_anchors(span, &covered, &xs) {
-                for (k, piece) in pieces.iter().enumerate() {
-                    push_cell(&mut cells, &mut cell_has_text, row, c_lo + k, piece);
-                    if !line.all_bold {
-                        cell_is_bold[row][c_lo + k] = false;
-                    }
-                }
-            } else {
-                // No whitespace to split on — assign whole span by center.
-                let cx = (span.x + span.width * 0.5).clamp(xs[0], xs[n_cols]);
-                if let Some(col) = find_bucket(&xs, cx) {
-                    push_cell(&mut cells, &mut cell_has_text, row, col, &span.text);
-                    if !line.all_bold {
-                        cell_is_bold[row][col] = false;
-                    }
-                }
-            }
-        }
-        consumed_indices.push(idx);
-    }
-
-    if consumed_indices.is_empty() {
-        if dbg {
-            eprintln!("[ruled]   REJECT no-lines-consumed");
-        }
-        return None;
-    }
-
-    let straddle_frac = if span_total > 0 {
-        span_straddle as f32 / span_total as f32
-    } else {
-        0.0
-    };
-    if dbg {
-        eprintln!("[ruled]   straddle {span_straddle}/{span_total} = {straddle_frac:.2}");
-    }
-    if span_total >= 6 && straddle_frac > 0.45 && !*super::flags::DISABLE_STRADDLE_GUARD {
-        if dbg {
-            eprintln!("[ruled]   REJECT straddle-frac {straddle_frac:.2}");
-        }
-        return None;
-    }
-
-    // Collapse "phantom rows" produced by stacked thin border-strip rects
-    // (doc 149 draws each visual table row as: top border strip ~1pt, body
-    // rect ~22pt, bottom border strip ~5pt — each contributes y-coords that
-    // survive the 2pt clustering as separate grid rows). Rule: drop a row
-    // iff (a) it has no text in any cell AND (b) its height is < 50% of the
-    // median non-empty row height. The height gate preserves real
-    // fill-in-the-blank forms where empty body rows are full-height.
-    let row_heights: Vec<f32> = (0..n_rows).map(|r| ys[r + 1] - ys[r]).collect();
-    let nonempty_heights: Vec<f32> = (0..n_rows)
-        .filter(|r| cell_has_text[*r].iter().any(|t| *t))
-        .map(|r| row_heights[r])
-        .collect();
-    let median_h = if !nonempty_heights.is_empty() {
-        let mut s = nonempty_heights.clone();
-        s.sort_by(|a, b| a.total_cmp(b));
-        s[s.len() / 2]
-    } else {
-        let mut s = row_heights.clone();
-        s.sort_by(|a, b| a.total_cmp(b));
-        s[s.len() / 2]
-    };
-    let keep: Vec<bool> = (0..n_rows)
-        .map(|r| {
-            let has_text = cell_has_text[r].iter().any(|t| *t);
-            has_text || row_heights[r] >= median_h * 0.8
-        })
-        .collect();
-    let kept_row_heights: Vec<f32> = (0..n_rows)
-        .filter(|r| keep[*r])
-        .map(|r| row_heights[r])
-        .collect();
-    let cells: Vec<Vec<String>> = (0..n_rows)
-        .filter(|r| keep[*r])
-        .map(|r| cells[r].clone())
-        .collect();
-    let cell_has_text: Vec<Vec<bool>> = (0..n_rows)
-        .filter(|r| keep[*r])
-        .map(|r| cell_has_text[r].clone())
-        .collect();
-    let cell_is_bold: Vec<Vec<bool>> = (0..n_rows)
-        .filter(|r| keep[*r])
-        .map(|r| cell_is_bold[r].clone())
-        .collect();
-    let cells_repl: Vec<Vec<String>> = (0..n_rows)
-        .filter(|r| keep[*r])
-        .map(|r| cells_repl[r].clone())
-        .collect();
-    let row_alpha_spanner: Vec<bool> = (0..n_rows)
-        .filter(|r| keep[*r])
-        .map(|r| row_alpha_spanner[r])
-        .collect();
-    let n_rows = cells.len();
+    // Collapse phantom rows (text-less thin border-strip rects) then phantom
+    // columns (text-less narrow border strips). A real table with one phantom
+    // border-strip column (doc 149) drops exactly one; a chart whose vertical
+    // grid-lines merged with text data (doc 078) collapses to 1 col and is
+    // rejected below, letting the borderless detector handle it.
+    let kept_row_heights = grid.collapse_phantom_rows(&ys);
+    let n_rows = grid.n_rows();
     if n_rows < 2 {
         if dbg {
             eprintln!("[ruled]   REJECT rows-after-collapse {n_rows}");
         }
         return None;
     }
-
-    // Mirror the row-collapse rule on columns. Some ruled tables (doc 149)
-    // draw their left/right borders as thin strip rects 5pt wide — those
-    // become phantom columns with no text. Drop columns that are both empty
-    // AND noticeably narrower than the median text-bearing column.
-    let col_widths: Vec<f32> = (0..n_cols).map(|c| xs[c + 1] - xs[c]).collect();
-    let nonempty_col_widths: Vec<f32> = (0..n_cols)
-        .filter(|c| (0..n_rows).any(|r| cell_has_text[r][*c]))
-        .map(|c| col_widths[c])
-        .collect();
-    let median_w = if !nonempty_col_widths.is_empty() {
-        let mut s = nonempty_col_widths.clone();
-        s.sort_by(|a, b| a.total_cmp(b));
-        s[s.len() / 2]
-    } else {
-        let mut s = col_widths.clone();
-        s.sort_by(|a, b| a.total_cmp(b));
-        s[s.len() / 2]
-    };
-    let keep_col: Vec<bool> = (0..n_cols)
-        .map(|c| {
-            let has_text = (0..n_rows).any(|r| cell_has_text[r][c]);
-            has_text || col_widths[c] >= median_w * 0.3
-        })
-        .collect();
-    // Cap how aggressively we drop columns. A real table with one phantom
-    // border-strip column (doc 149: 5pt-wide left border) drops exactly one.
-    // Anything more than that is almost certainly a chart whose vertical
-    // grid-lines got merged with text data (doc 078: a chart's 18 V-lines
-    // straddle a table to its left/right and collapse to 1 col), so the
-    // "table" is bogus — bail and let the borderless detector handle it.
-    // Note: keep_col already only drops columns where both (a) no text AND
-    // (b) width < 30% of median text-bearing column.
-    let cells: Vec<Vec<String>> = cells
-        .into_iter()
-        .map(|row| {
-            row.into_iter()
-                .enumerate()
-                .filter(|(c, _)| keep_col[*c])
-                .map(|(_, v)| v)
-                .collect()
-        })
-        .collect();
-    let cell_has_text: Vec<Vec<bool>> = cell_has_text
-        .into_iter()
-        .map(|row| {
-            row.into_iter()
-                .enumerate()
-                .filter(|(c, _)| keep_col[*c])
-                .map(|(_, v)| v)
-                .collect()
-        })
-        .collect();
-    let cell_is_bold: Vec<Vec<bool>> = cell_is_bold
-        .into_iter()
-        .map(|row| {
-            row.into_iter()
-                .enumerate()
-                .filter(|(c, _)| keep_col[*c])
-                .map(|(_, v)| v)
-                .collect()
-        })
-        .collect();
-    let cells_repl: Vec<Vec<String>> = cells_repl
-        .into_iter()
-        .map(|row| {
-            row.into_iter()
-                .enumerate()
-                .filter(|(c, _)| keep_col[*c])
-                .map(|(_, v)| v)
-                .collect()
-        })
-        .collect();
-    let n_cols = cells.first().map(|r| r.len()).unwrap_or(0);
+    grid.collapse_phantom_cols(&xs);
+    let n_cols = grid.n_cols();
     if n_cols == 0 {
         return None;
     }
@@ -2965,209 +3255,47 @@ fn build_ruled_table(
         return None;
     }
 
-    // Colspan header-band flattening (Mode 5 / TRM): a sparse top row whose
-    // alpha spanning label covers several columns ("North America" over its
-    // Revenue/Units sub-columns) followed by a dense label row is a stacked
-    // header. Flatten rows 0..=b from the colspan-semantics grid into one
-    // header row (per-column top-to-bottom join), so each column carries its
-    // full layer chain ("North America Revenue") — that chain is what
-    // header-keyed evals (and readers) need.
-    let flattened_header: Option<(Vec<String>, usize)> = {
-        let row_fill =
-            |r: usize| cell_has_text[r].iter().filter(|t| **t).count() as f32 / n_cols as f32;
-        (0..n_rows)
-            .find(|r| row_fill(*r) >= TABLE_ROW_MIN_FILL)
-            .and_then(|b| {
-                let nonempty = cell_has_text[b].iter().filter(|t| **t).count();
-                let alpha_cells = (0..n_cols)
-                    .filter(|c| cell_has_text[b][*c] && is_alpha_dominant(&cells[b][*c]))
-                    .count();
-                // The bottom header layer may carry digit labels (years like
-                // "2024") but never measurement values. A decimal / % / $ /
-                // dash-placeholder / comma-grouped number in the anchor row means
-                // it's the first DATA row of a table whose real header just
-                // missed the 0.9-fill anchor (colspan header covering <90% of
-                // columns) — folding it would eat a data row (DS5795A_page4).
-                let has_value_cell =
-                    (0..n_cols).any(|c| cell_has_text[b][c] && is_value_like(&cells[b][c]));
-                let qualifies = (1..=3).contains(&b)
-                    && b + 1 < n_rows
-                    && (0..b).any(|r| row_alpha_spanner[r])
-                    && alpha_cells * 2 >= nonempty
-                    && !has_value_cell;
-                if !qualifies {
-                    return None;
-                }
-                let header: Vec<String> = (0..n_cols)
-                    .map(|c| {
-                        let mut parts: Vec<&str> = Vec::new();
-                        for row in cells_repl.iter().take(b + 1) {
-                            let s = row[c].as_str();
-                            if s.is_empty() || parts.last() == Some(&s) {
-                                continue;
-                            }
-                            parts.push(s);
-                        }
-                        parts.join(" ")
-                    })
-                    .collect();
-                if header.iter().all(|h| h.is_empty()) {
-                    return None;
-                }
-                if dbg {
-                    eprintln!("[ruled]   colspan header flatten: rows 0..={b} -> {header:?}");
-                }
-                Some((header, b + 1))
-            })
-    };
+    // Hand the collapsed grids back to plain locals for the header-detection
+    // stages below.
+    let CellGrid {
+        text: cells,
+        is_bold: cell_is_bold,
+        has_text: cell_has_text,
+        repl: cells_repl,
+        row_alpha_spanner,
+    } = grid;
 
-    // Stacked-header merge (Mode 5): some generators rule every text baseline
-    // of a wrapped header cell, slicing one logical header row into several
-    // thin sparse rows ("Rated" / "Voltage" / "(VDC)" each in its own band).
-    // When the top k≥2 rows are individually sparse but their union covers
-    // most columns AND a dense data row follows, collapse them into a single
-    // header row (per-column top-to-bottom join).
-    let (cells, cell_has_text, cell_is_bold, n_rows, merged_stacked_header) = {
-        let row_fill = |r: usize, has: &Vec<Vec<bool>>| {
-            has[r].iter().filter(|t| **t).count() as f32 / n_cols as f32
-        };
-        // Anchor on the first fully-dense row (the first real data row).
-        let k = (0..n_rows)
-            .find(|r| row_fill(*r, &cell_has_text) >= TABLE_ROW_MIN_FILL)
-            .unwrap_or(0);
-        let union_cols = (0..n_cols)
-            .filter(|c| (0..k).any(|r| cell_has_text[r][*c]))
-            .count();
-        // Tightness: the band rows must be noticeably shorter than the data
-        // rows below — ruled-per-baseline header bands sit at text leading
-        // (~7pt) while real rows carry cell padding. Without this, a table
-        // whose first body rows are legitimately sparse would get merged.
-        let band_tight = if k >= 2 && k < kept_row_heights.len() {
-            let mut below: Vec<f32> = kept_row_heights[k..].to_vec();
-            below.sort_by(|a, b| a.total_cmp(b));
-            let median_below = below[below.len() / 2];
-            kept_row_heights[..k]
-                .iter()
-                .all(|h| *h <= 0.75 * median_below)
-        } else {
-            false
-        };
-        if flattened_header.is_none()
-            && k >= 2
-            && k < n_rows
-            && band_tight
-            && union_cols as f32 >= 0.7 * n_cols as f32
-        {
-            if dbg {
-                eprintln!("[ruled]   stacked-header merge: top {k} rows → 1");
-            }
-            let mut merged_row = vec![String::new(); n_cols];
-            let mut merged_has = vec![false; n_cols];
-            let mut merged_bold = vec![true; n_cols];
-            for r in 0..k {
-                for c in 0..n_cols {
-                    if cell_has_text[r][c] {
-                        if !merged_row[c].is_empty() {
-                            merged_row[c].push(' ');
-                        }
-                        merged_row[c].push_str(&cells[r][c]);
-                        merged_has[c] = true;
-                        if !cell_is_bold[r][c] {
-                            merged_bold[c] = false;
-                        }
-                    }
-                }
-            }
-            let mut new_cells = vec![merged_row];
-            let mut new_has = vec![merged_has];
-            let mut new_bold = vec![merged_bold];
-            new_cells.extend(cells[k..].iter().cloned());
-            new_has.extend(cell_has_text[k..].iter().cloned());
-            new_bold.extend(cell_is_bold[k..].iter().cloned());
-            let nr = new_cells.len();
-            (new_cells, new_has, new_bold, nr, true)
-        } else {
-            (cells, cell_has_text, cell_is_bold, n_rows, false)
-        }
-    };
+    let flattened_header = flatten_header_band(
+        &cells,
+        &cell_has_text,
+        &cells_repl,
+        &row_alpha_spanner,
+        n_rows,
+        n_cols,
+        dbg,
+    );
 
-    let total = n_rows * n_cols;
-    let empty_count = cell_has_text
-        .iter()
-        .flatten()
-        .filter(|filled| !**filled)
-        .count();
-    let empty_frac = (empty_count as f32) / (total as f32);
-    if empty_frac > TABLE_MAX_EMPTY_CELL_FRACTION {
-        let col0_fill = (0..n_rows).filter(|r| cell_has_text[*r][0]).count() as f32 / n_rows as f32;
-        let col0_max_chars = (0..n_rows)
-            .filter(|r| cell_has_text[*r][0])
-            .map(|r| cells[r][0].len())
-            .max()
-            .unwrap_or(0);
-        let col0_spine =
-            col0_fill >= TABLE_SPINE_FILL_FRACTION && col0_max_chars <= TABLE_SPINE_MAX_CELL_CHARS;
-        // Long-prose table bypass: a large grid (≥5×3) with a structurally
-        // bold row 0 header AND a dense description column (any col with
-        // ≥70% fill rate) is almost certainly a multi-line legal/reference
-        // table where the description column wraps over many empty
-        // continuation rows. Density arbitration in `merge_table_runs`
-        // prevents a decorative grid that happens to match these criteria
-        // from beating a real overlapping borderless table.
-        // Reproducer: docs 088/089/090 multi-page legal report.
-        // Header may span multiple visual rows (the grid detector slices on
-        // each text baseline). Treat the first ≤4 rows as the header band
-        // and require their *union* to cover most columns AND be all-bold.
-        let header_band = n_rows.min(4);
-        let mut header_cols_covered = vec![false; n_cols];
-        let mut header_all_bold = true;
-        for r in 0..header_band {
-            for c in 0..n_cols {
-                if cell_has_text[r][c] {
-                    header_cols_covered[c] = true;
-                    if !cell_is_bold[r][c] {
-                        header_all_bold = false;
-                    }
-                }
-            }
-        }
-        let header_coverage = header_cols_covered.iter().filter(|t| **t).count();
-        let dense_inner_col = (1..n_cols).any(|c| {
-            let col_fill =
-                (0..n_rows).filter(|r| cell_has_text[*r][c]).count() as f32 / n_rows as f32;
-            col_fill >= TABLE_SPINE_FILL_FRACTION
-        });
-        // Header coverage doesn't need to span every column — wide-cell
-        // legal tables often spread the header across many visual baselines
-        // and only a few columns land in the top-4-rows band. Require ≥3
-        // columns covered as evidence of a real header, not just a title.
-        let long_prose_table = n_rows >= 5
-            && n_cols >= 3
-            && header_coverage >= 3
-            && header_all_bold
-            && dense_inner_col;
-        // A fired colspan header flatten is table evidence on par with a
-        // label spine: it required a ≥0.9-fill alpha label row under an
-        // alpha spanning group label — decorative grids don't have that.
-        // Still subject to the WITH_SPINE ceiling below.
-        let flattened_evidence = flattened_header.is_some();
-        if !col0_spine && !long_prose_table && !flattened_evidence {
-            if dbg {
-                let fills: Vec<usize> = (0..n_rows)
-                    .map(|r| cell_has_text[r].iter().filter(|t| **t).count())
-                    .collect();
-                eprintln!(
-                    "[ruled]   REJECT empty-frac {empty_frac:.2} ({n_rows}x{n_cols}, no spine/long-prose) row_fills={fills:?}"
-                );
-            }
-            return None;
-        }
-        if empty_frac > TABLE_MAX_EMPTY_CELL_FRACTION_WITH_SPINE && !long_prose_table {
-            if dbg {
-                eprintln!("[ruled]   REJECT empty-frac-with-spine {empty_frac:.2}");
-            }
-            return None;
-        }
+    let (cells, cell_has_text, cell_is_bold, n_rows, merged_stacked_header) = merge_stacked_header(
+        cells,
+        cell_has_text,
+        cell_is_bold,
+        n_rows,
+        n_cols,
+        &kept_row_heights,
+        flattened_header.is_some(),
+        dbg,
+    );
+
+    if !passes_density_gate(
+        &cells,
+        &cell_has_text,
+        &cell_is_bold,
+        n_rows,
+        n_cols,
+        flattened_header.is_some(),
+        dbg,
+    ) {
+        return None;
     }
 
     // Header preference order: flattened colspan band (carries the full
@@ -3328,7 +3456,7 @@ fn detect_ruled_tables_impl(
     graphics: &[GraphicPrimitive],
     page_width: f32,
     page_height: f32,
-    global: bool,
+    pass: RuledPass,
 ) -> Vec<(TableRun, Vec<usize>)> {
     let (hs, vs) = extract_h_v_segments(graphics);
     let hs = cluster_h_segments(hs);
@@ -3347,7 +3475,7 @@ fn detect_ruled_tables_impl(
             lines,
             page_width,
             page_height,
-            global,
+            pass,
         ) {
             out.push(run);
         }
@@ -3364,10 +3492,16 @@ pub(super) fn detect_ruled_tables(
     page_width: f32,
     page_height: f32,
 ) -> Vec<TableRun> {
-    detect_ruled_tables_impl(lines, graphics, page_width, page_height, false)
-        .into_iter()
-        .map(|(r, _)| r)
-        .collect()
+    detect_ruled_tables_impl(
+        lines,
+        graphics,
+        page_width,
+        page_height,
+        RuledPass::PerRegion,
+    )
+    .into_iter()
+    .map(|(r, _)| r)
+    .collect()
 }
 
 /// Page-level ruled-table detection over *all* lines. A table whose rows
@@ -3381,7 +3515,7 @@ pub(super) fn detect_ruled_tables_global(
     page_width: f32,
     page_height: f32,
 ) -> Vec<(TableRun, Vec<usize>)> {
-    detect_ruled_tables_impl(lines, graphics, page_width, page_height, true)
+    detect_ruled_tables_impl(lines, graphics, page_width, page_height, RuledPass::Global)
 }
 
 /// Count filled (non-empty) cells in a TableRun. GridFallback returns 0 so

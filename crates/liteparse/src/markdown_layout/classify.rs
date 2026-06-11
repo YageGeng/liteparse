@@ -395,6 +395,73 @@ pub fn classify_page_with_filters(
     stitch_regions(blocks, &region_boundaries)
 }
 
+/// Mutable per-line flow state threaded through `classify_region`: the active
+/// paragraph accumulator, the active code run, and the current list run. The
+/// flush/reset/emit methods live here so the (previously 8-parameter) closures
+/// and the six copy-pasted "reset list state" blocks collapse to method calls;
+/// methods on the struct also sidestep the borrow-checker friction of threading
+/// five `&mut Option<…>` cells through a free closure.
+#[derive(Default)]
+struct FlowState {
+    paragraph: Option<ParaAccum>,
+    code: Option<Vec<String>>,
+    list_base_indent: Option<f32>,
+    last_list_item_idx: Option<usize>,
+    last_list_line: Option<usize>,
+}
+
+impl FlowState {
+    /// Drop the active list run. A heading, table, code block, or paragraph
+    /// break all terminate the current list.
+    fn reset_list(&mut self) {
+        self.list_base_indent = None;
+        self.last_list_item_idx = None;
+        self.last_list_line = None;
+    }
+
+    /// Emit the active paragraph (if it has non-blank content) and clear it.
+    fn flush_paragraph(&mut self, blocks: &mut Vec<Block>) {
+        if let Some(acc) = self.paragraph.take()
+            && !acc.raw.trim().is_empty()
+        {
+            blocks.push(paragraph_from_accum(acc));
+        }
+    }
+
+    /// Emit the active code run (if non-empty) and clear it.
+    fn flush_code(&mut self, blocks: &mut Vec<Block>) {
+        if let Some(lines) = self.code.take()
+            && !lines.is_empty()
+        {
+            blocks.push(Block::CodeBlock { lines });
+        }
+    }
+
+    /// Emit any interruptions whose y is at or above `before_y`, flushing the
+    /// active paragraph/code/list state first so each lands as its own block.
+    fn emit_before(
+        &mut self,
+        blocks: &mut Vec<Block>,
+        iter: &mut std::iter::Peekable<std::vec::IntoIter<(f32, Interruption)>>,
+        before_y: f32,
+    ) {
+        while let Some((y, _)) = iter.peek() {
+            if *y > before_y {
+                break;
+            }
+            let (_, kind) = iter.next().unwrap();
+            self.flush_paragraph(blocks);
+            self.flush_code(blocks);
+            self.reset_list();
+            blocks.push(match kind {
+                Interruption::Hr => Block::HorizontalRule,
+                Interruption::Figure(r) => Block::Figure { id: r.id },
+                Interruption::Table(b) => b,
+            });
+        }
+    }
+}
+
 /// Classify the lines of a single xy_cut leaf into a sequence of blocks. All
 /// per-line state (active paragraph, code run, list run, heading_run) is local
 /// to this call — nothing crosses a leaf boundary except through the explicit
@@ -413,32 +480,13 @@ fn classify_region(
     precomputed_tables: Option<Vec<super::tables::TableRun>>,
 ) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
-    let mut paragraph: Option<ParaAccum> = None;
-    let mut code: Option<Vec<String>> = None;
-    let mut list_base_indent: Option<f32> = None;
-    let mut last_list_item_idx: Option<usize> = None;
-    let mut last_list_line: Option<usize> = None;
+    let mut state = FlowState::default();
     let mut heading_run: Option<(u8, usize)> = None;
     // Track whether we've already emitted a TOC title on this page. Once seen,
     // any subsequent line matching `is_toc_title` (e.g. "Index", "List of
     // Figures") is a TOC entry pointing at that chapter, not another title,
     // and must stay suppressed.
     let mut toc_title_emitted = false;
-
-    let flush_paragraph = |blocks: &mut Vec<Block>, p: Option<ParaAccum>| {
-        if let Some(acc) = p
-            && !acc.raw.trim().is_empty()
-        {
-            blocks.push(paragraph_from_accum(acc));
-        }
-    };
-    let flush_code = |blocks: &mut Vec<Block>, c: Option<Vec<String>>| {
-        if let Some(lines) = c
-            && !lines.is_empty()
-        {
-            blocks.push(Block::CodeBlock { lines });
-        }
-    };
 
     // Per-region table detection. Indices are local to `lines`. Page-level
     // graphics are still consulted for ruled-table detection because path
@@ -475,34 +523,6 @@ fn classify_region(
     region_interruptions.sort_by(|a, b| a.0.total_cmp(&b.0));
     let mut interruptions = region_interruptions.into_iter().peekable();
 
-    // Emit any interruptions whose y is at or above `before_y`, flushing the
-    // active paragraph/code/list state first so each lands as its own block.
-    let emit_before = |blocks: &mut Vec<Block>,
-                       paragraph: &mut Option<ParaAccum>,
-                       code: &mut Option<Vec<String>>,
-                       list_base: &mut Option<f32>,
-                       last_item: &mut Option<usize>,
-                       last_line: &mut Option<usize>,
-                       iter: &mut std::iter::Peekable<std::vec::IntoIter<(f32, Interruption)>>,
-                       before_y: f32| {
-        while let Some((y, _)) = iter.peek() {
-            if *y > before_y {
-                break;
-            }
-            let (_, kind) = iter.next().unwrap();
-            flush_paragraph(blocks, paragraph.take());
-            flush_code(blocks, code.take());
-            *list_base = None;
-            *last_item = None;
-            *last_line = None;
-            blocks.push(match kind {
-                Interruption::Hr => Block::HorizontalRule,
-                Interruption::Figure(r) => Block::Figure { id: r.id },
-                Interruption::Table(b) => b,
-            });
-        }
-    };
-
     let mut idx = 0;
     while idx < lines.len() {
         if let Some(run) = table_iter.peek()
@@ -510,21 +530,10 @@ fn classify_region(
         {
             // Flush any interruptions above this table's top edge first.
             let table_top = lines[run.start].bbox.y;
-            emit_before(
-                &mut blocks,
-                &mut paragraph,
-                &mut code,
-                &mut list_base_indent,
-                &mut last_list_item_idx,
-                &mut last_list_line,
-                &mut interruptions,
-                table_top,
-            );
-            flush_paragraph(&mut blocks, paragraph.take());
-            flush_code(&mut blocks, code.take());
-            list_base_indent = None;
-            last_list_item_idx = None;
-            last_list_line = None;
+            state.emit_before(&mut blocks, &mut interruptions, table_top);
+            state.flush_paragraph(&mut blocks);
+            state.flush_code(&mut blocks);
+            state.reset_list();
             let run = table_iter.next().unwrap();
             blocks.push(run.block);
             idx = run.end;
@@ -533,16 +542,7 @@ fn classify_region(
         let line_idx = idx;
         let line = &lines[line_idx];
         // Emit any interruptions that fall above this line.
-        emit_before(
-            &mut blocks,
-            &mut paragraph,
-            &mut code,
-            &mut list_base_indent,
-            &mut last_list_item_idx,
-            &mut last_list_line,
-            &mut interruptions,
-            line.bbox.y,
-        );
+        state.emit_before(&mut blocks, &mut interruptions, line.bbox.y);
         idx += 1;
         let text = line.text.trim();
         if text.is_empty() {
@@ -571,16 +571,16 @@ fn classify_region(
         // still becomes code. Mono content also wouldn't make a useful
         // heading.
         if line.all_mono {
-            flush_paragraph(&mut blocks, paragraph.take());
-            list_base_indent = None;
-            last_list_item_idx = None;
-            last_list_line = None;
-            code.get_or_insert_with(Vec::new)
+            state.flush_paragraph(&mut blocks);
+            state.reset_list();
+            state
+                .code
+                .get_or_insert_with(Vec::new)
                 .push(line.text.trim_end().to_string());
             continue;
         }
         // Any non-mono line ends the current code block (if any).
-        flush_code(&mut blocks, code.take());
+        state.flush_code(&mut blocks);
 
         // Priority chain: tagged-PDF struct tree → outline → font-size map.
         let tagged_level = struct_heading_level(line, &page.struct_nodes);
@@ -614,10 +614,11 @@ fn classify_region(
         // Outline / struct-tree levels are explicit and bypass this guard.
         let size_level = size_level.filter(|_| {
             let starts_lower = text.chars().next().is_some_and(|c| c.is_lowercase());
-            let prev = paragraph
+            let prev = state
+                .paragraph
                 .as_ref()
                 .map(|p| &p.last)
-                .or(last_list_line.map(|i| &lines[i]));
+                .or(state.last_list_line.map(|i| &lines[i]));
             // A previous line ending in a mid-word hyphen wrap means this
             // line is its continuation regardless of capitalization
             // ("…SOLAR 10.7 Billion-" / "Parameter Model: We have…").
@@ -736,7 +737,7 @@ fn classify_region(
                 if combined_chars > HEADING_MAX_TEXT_CHARS {
                     let demoted = std::mem::take(htext);
                     blocks.pop();
-                    paragraph = Some(ParaAccum {
+                    state.paragraph = Some(ParaAccum {
                         raw: demoted.clone(),
                         inline: demoted,
                         last: lines[*run_idx].clone(),
@@ -751,10 +752,8 @@ fn classify_region(
                 }
             }
             if !demoted_heading {
-                flush_paragraph(&mut blocks, paragraph.take());
-                list_base_indent = None;
-                last_list_item_idx = None;
-                last_list_line = None;
+                state.flush_paragraph(&mut blocks);
+                state.reset_list();
                 if debug {
                     eprintln!(
                         "[MD heading-emit size/outline] h{} idx={} '{}' size={:.2}",
@@ -787,16 +786,15 @@ fn classify_region(
                 && looks_like_numbered_bold_heading(
                     line,
                     rest,
-                    paragraph
+                    state
+                        .paragraph
                         .as_ref()
                         .map(|p| &p.last)
-                        .or(last_list_line.map(|i| &lines[i])),
+                        .or(state.last_list_line.map(|i| &lines[i])),
                 )
             {
-                flush_paragraph(&mut blocks, paragraph.take());
-                list_base_indent = None;
-                last_list_item_idx = None;
-                last_list_line = None;
+                state.flush_paragraph(&mut blocks);
+                state.reset_list();
                 let level = (heading_map.len() as u8 + 1).clamp(1, MAX_HEADING_LEVELS as u8);
                 blocks.push(Block::Heading {
                     level,
@@ -804,13 +802,13 @@ fn classify_region(
                 });
                 continue;
             }
-            flush_paragraph(&mut blocks, paragraph.take());
-            let base = *list_base_indent.get_or_insert(line.indent_x);
+            state.flush_paragraph(&mut blocks);
+            let base = *state.list_base_indent.get_or_insert(line.indent_x);
             let level = (((line.indent_x - base) / LIST_INDENT_STEP_PT)
                 .round()
                 .max(0.0)) as u8;
-            last_list_item_idx = Some(blocks.len());
-            last_list_line = Some(line_idx);
+            state.last_list_item_idx = Some(blocks.len());
+            state.last_list_line = Some(line_idx);
             // Render the list-item text via the inline pipeline so per-span
             // emphasis surfaces. We strip the marker from `rest` (already
             // done by `parse_list_marker`), but emphasis lives on `line.spans`,
@@ -831,8 +829,8 @@ fn classify_region(
         // Continuation of a list item: same gap/font rules as paragraphs.
         // Footnote-style continuations often left-flush below the marker's
         // hanging indent, so we don't require indent ≥ marker indent.
-        if let Some(item_idx) = last_list_item_idx
-            && let Some(prev_idx) = last_list_line
+        if let Some(item_idx) = state.last_list_item_idx
+            && let Some(prev_idx) = state.last_list_line
             && continues_paragraph(&lines[prev_idx], line)
             && let Some(Block::ListItem {
                 text: prev_text, ..
@@ -842,7 +840,7 @@ fn classify_region(
             // inline-styled continuation.
             let cont_inline = render_line_inline(line);
             append_inline_continuation(prev_text, text, &cont_inline);
-            last_list_line = Some(line_idx);
+            state.last_list_line = Some(line_idx);
             continue;
         }
 
@@ -851,16 +849,15 @@ fn classify_region(
         // "1 Introduction"); without this rule they look just like a bold
         // first sentence of a paragraph. Runs after list-marker detection so
         // bold bullet items stay as list items.
-        let prev_for_gap = paragraph
+        let prev_for_gap = state
+            .paragraph
             .as_ref()
             .map(|p| &p.last)
-            .or(last_list_line.map(|i| &lines[i]));
+            .or(state.last_list_line.map(|i| &lines[i]));
         let next_for_gap = lines.get(idx);
         if !toc_suppress && looks_like_bold_heading(line, prev_for_gap, next_for_gap) {
-            flush_paragraph(&mut blocks, paragraph.take());
-            list_base_indent = None;
-            last_list_item_idx = None;
-            last_list_line = None;
+            state.flush_paragraph(&mut blocks);
+            state.reset_list();
             // Level: one deeper than the deepest size-based level we already
             // have. With an empty heading_map this lands on H1; with a full
             // 6-level map it caps at H6.
@@ -884,19 +881,17 @@ fn classify_region(
             continue;
         }
 
-        match paragraph.as_mut() {
+        match state.paragraph.as_mut() {
             Some(acc) if continues_paragraph(&acc.last, line) => {
                 append_to_paragraph(acc, line);
             }
             _ => {
-                flush_paragraph(&mut blocks, paragraph.take());
-                list_base_indent = None;
-                last_list_item_idx = None;
-                last_list_line = None;
+                state.flush_paragraph(&mut blocks);
+                state.reset_list();
                 let inline = render_line_inline(line);
                 let raw = collapse_whitespace(text);
                 let uniform = line_uniform_style(line).map(|s| (s.bold, s.italic));
-                paragraph = Some(ParaAccum {
+                state.paragraph = Some(ParaAccum {
                     raw,
                     inline,
                     last: line.clone(),
@@ -906,19 +901,10 @@ fn classify_region(
         }
     }
 
-    flush_paragraph(&mut blocks, paragraph.take());
-    flush_code(&mut blocks, code.take());
+    state.flush_paragraph(&mut blocks);
+    state.flush_code(&mut blocks);
     // Flush any trailing interruptions that sat below the last text line.
-    emit_before(
-        &mut blocks,
-        &mut paragraph,
-        &mut code,
-        &mut list_base_indent,
-        &mut last_list_item_idx,
-        &mut last_list_line,
-        &mut interruptions,
-        f32::INFINITY,
-    );
+    state.emit_before(&mut blocks, &mut interruptions, f32::INFINITY);
     blocks
 }
 
