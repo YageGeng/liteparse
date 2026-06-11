@@ -5,10 +5,10 @@ use super::paragraphs::collapse_whitespace;
 /// Fraction of page height treated as the "top band" for header detection.
 /// Most running headers sit within the top 8–12% of a page; 12% gives some
 /// slack for two-line headers without sweeping in body text.
-pub(super) const HEADER_BAND_FRACTION: f32 = 0.12;
+const HEADER_BAND_FRACTION: f32 = 0.12;
 
 /// Fraction of page height treated as the "bottom band" for footer detection.
-pub(super) const FOOTER_BAND_FRACTION: f32 = 0.12;
+const FOOTER_BAND_FRACTION: f32 = 0.12;
 
 /// Fraction of pages on which a normalized line must appear (in the same
 /// band) to be classified as a running header/footer.
@@ -116,7 +116,7 @@ const SP_ISOLATION_GAP_RATIO: f32 = 1.0;
 ///
 /// Returns true only for unambiguous chrome patterns — false-positive
 /// recall on body prose is the main risk to guard.
-pub(super) fn matches_chrome_pattern(text: &str) -> bool {
+fn matches_chrome_pattern(text: &str) -> bool {
     let t = text.trim();
     if t.is_empty() {
         return false;
@@ -267,9 +267,6 @@ pub fn detect_single_page_chrome(
     }
     let top_cutoff = h * SP_TOP_BAND_FRACTION;
     let bottom_cutoff = h * (1.0 - SP_BOTTOM_BAND_FRACTION);
-    // Use body size as the gap reference when known; otherwise fall back to
-    // the line's own height.
-    let body_gap_ref = if body_size > 0.0 { body_size } else { 0.0 };
 
     // Cache line top/bottom so isolation checks are straightforward.
     let tops: Vec<f32> = page.projected_lines.iter().map(|l| l.bbox.y).collect();
@@ -292,9 +289,10 @@ pub fn detect_single_page_chrome(
 
         // Isolation: gap to the nearest non-band neighbor must be ≥ the
         // configured ratio of body line height. For a top header we look
-        // *down*; for a bottom footer we look *up*.
-        let gap_ref = if body_gap_ref > 0.0 {
-            body_gap_ref
+        // *down*; for a bottom footer we look *up*. Use body size as the gap
+        // reference when known; otherwise fall back to the line's own height.
+        let gap_ref = if body_size > 0.0 {
+            body_size
         } else {
             line.bbox.height.max(1.0)
         };
@@ -312,7 +310,7 @@ pub fn detect_single_page_chrome(
                     *j != idx && tops[*j] > bots[idx] && !matches_chrome_pattern(l.text.trim())
                 })
                 .map(|(j, _)| tops[j] - bots[idx])
-                .min_by(|a, b| a.partial_cmp(b).unwrap())
+                .min_by(|a, b| a.total_cmp(b))
                 .map(|gap| gap >= required_gap)
                 .unwrap_or(true)
         } else {
@@ -323,7 +321,7 @@ pub fn detect_single_page_chrome(
                     *j != idx && bots[*j] < tops[idx] && !matches_chrome_pattern(l.text.trim())
                 })
                 .map(|(j, _)| tops[idx] - bots[j])
-                .min_by(|a, b| a.partial_cmp(b).unwrap())
+                .min_by(|a, b| a.total_cmp(b))
                 .map(|gap| gap >= required_gap)
                 .unwrap_or(true)
         };

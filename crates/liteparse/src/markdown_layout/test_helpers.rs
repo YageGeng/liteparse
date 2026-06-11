@@ -167,14 +167,11 @@ pub(crate) fn page_with_graphics(
 
 pub(crate) fn header_footer_page(n: usize, header: &str, footer: &str, body: &str) -> ParsedPage {
     // Page height 100 → header band ≤12pt, footer band ≥88pt.
-    let mut lines = vec![
+    let lines = vec![
         line(header, 50.0, 5.0, 8.0, 8.0),
         line(body, 50.0, 50.0, 10.0, 10.0),
         line(footer, 50.0, 92.0, 6.0, 6.0),
     ];
-    for l in &mut lines {
-        l.region_path = Vec::new();
-    }
     ParsedPage {
         page_number: n,
         page_width: 612.0,

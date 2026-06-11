@@ -383,7 +383,7 @@ pub(super) fn looks_like_bold_heading(
     //   - ≥3 space-separated words after the break
     //   - line ends with mid-word "-" (wrap continuation) OR is >50 chars
     //   - first char after the break is uppercase ASCII letter
-    let colon_ok = std::env::var("LITEPARSE_DISABLE_HEADING_GUARDS").is_err();
+    let colon_ok = !*super::flags::DISABLE_HEADING_GUARDS;
     let run_in_break = text
         .find(". ")
         .map(|p| (p, 2))
@@ -404,7 +404,7 @@ pub(super) fn looks_like_bold_heading(
             && starts_upper
             && ((word_count >= 2 && ends_hyphen) || (word_count >= 3 && text.chars().count() > 50))
         {
-            if std::env::var("LITEPARSE_DEBUG_MD").is_ok() {
+            if *super::flags::DEBUG_MD {
                 eprintln!(
                     "[MD bold-heading REJECT run-in] '{}' (pos={} word_count={} ends_hyphen={} len={})",
                     text.chars().take(80).collect::<String>(),

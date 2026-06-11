@@ -3,23 +3,23 @@ use crate::types::{Anchor, ProjectedLine};
 use super::inline::{SpanStyle, line_all_bold, line_uniform_style, render_line_inline};
 
 /// Multiplier on line height used as the paragraph-break threshold.
-pub(super) const PARAGRAPH_GAP_MULTIPLIER: f32 = 1.5;
+const PARAGRAPH_GAP_MULTIPLIER: f32 = 1.5;
 
 /// Tolerance for treating two font sizes as "the same" when grouping
 /// paragraph lines, when at least one side falls back to a bbox-height
 /// estimate. Set above descender-driven jitter (~1pt) but below a
 /// 12→14pt section-heading step that often follows a smaller caption
 /// line with the same bold style.
-pub(super) const FONT_SIZE_PARAGRAPH_TOLERANCE: f32 = 1.5;
+const FONT_SIZE_PARAGRAPH_TOLERANCE: f32 = 1.5;
 /// Tolerance when both lines report real Tf-set sizes. Tight, so a
 /// 12pt-bold caption line directly above a 14pt-bold section heading
 /// doesn't accidentally merge them into a single paragraph that swallows
 /// the heading.
-pub(super) const FONT_SIZE_PARAGRAPH_TOLERANCE_REAL: f32 = 0.5;
+const FONT_SIZE_PARAGRAPH_TOLERANCE_REAL: f32 = 0.5;
 
 /// Pick the right size-equality tolerance depending on whether either
 /// side has an estimated (jitter-prone) font size.
-pub(super) fn font_size_paragraph_tolerance(prev: &ProjectedLine, cur: &ProjectedLine) -> f32 {
+fn font_size_paragraph_tolerance(prev: &ProjectedLine, cur: &ProjectedLine) -> f32 {
     if prev.font_size_is_estimated || cur.font_size_is_estimated {
         FONT_SIZE_PARAGRAPH_TOLERANCE
     } else {
@@ -28,7 +28,7 @@ pub(super) fn font_size_paragraph_tolerance(prev: &ProjectedLine, cur: &Projecte
 }
 
 /// Tolerance in points for treating two indent positions as "the same column".
-pub(super) const INDENT_TOLERANCE: f32 = 6.0;
+const INDENT_TOLERANCE: f32 = 6.0;
 
 /// Collapse runs of whitespace into single spaces. The projected text from
 /// `projection.rs` pads with column-alignment spaces (e.g. `for    instance`)

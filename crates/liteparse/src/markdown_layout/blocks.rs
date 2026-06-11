@@ -49,7 +49,6 @@ pub enum Block {
     /// `![](image_{id}.png)`. Suppressed entirely when `ImageMode::Off`.
     Figure {
         id: String,
-        bbox: crate::types::Rect,
     },
 }
 

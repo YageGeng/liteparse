@@ -1,8 +1,8 @@
 use crate::types::{GraphicPrimitive, ProjectedLine, Rect, TextItem};
 
 use super::blocks::Block;
-use super::inline::is_bold_span;
 use super::paragraphs::collapse_whitespace;
+use crate::projection::is_bold_item;
 
 /// Minimum cells per row for a region to qualify as a table.
 pub(super) const TABLE_MIN_COLUMNS: usize = 3;
@@ -112,7 +112,7 @@ pub(super) fn split_cells(line: &ProjectedLine) -> Vec<TableCell> {
         current_text.push_str(&span.text);
         let n = span.text.chars().count();
         current_total_chars += n;
-        if is_bold_span(span) {
+        if is_bold_item(span) {
             current_bold_chars += n;
         }
         prev_right = span.x + span.width.max(0.0);
@@ -137,10 +137,7 @@ pub(super) fn split_cells(line: &ProjectedLine) -> Vec<TableCell> {
 ///
 /// Returns the patched cells if every short cell could be cleanly split to
 /// recover `tracks.len()` cells total; otherwise `None`.
-pub(super) fn recover_merged_cell(
-    mut cells: Vec<TableCell>,
-    tracks: &[f32],
-) -> Option<Vec<TableCell>> {
+fn recover_merged_cell(mut cells: Vec<TableCell>, tracks: &[f32]) -> Option<Vec<TableCell>> {
     let target = tracks.len();
     if cells.len() >= target {
         return None;
@@ -450,13 +447,6 @@ fn cells_from_raw_items_with_tracks(
     if spans.len() < 2 {
         return None;
     }
-    // Reject rows that contain a span with implausibly narrow reported
-    // width-per-character (a known PDFium quirk on some encodings where the
-    // bbox shrinks but the text payload is full-length). Without this, the
-    // narrow x-range tricks track inference into treating the next visible
-    // span as a "second column", manufacturing a fake table from prose.
-    // Real text averages 4-10pt/char at common font sizes; 2pt/char is a
-    // generous lower bound that only flags genuinely degenerate widths.
     let tol = TABLE_TRACK_TOLERANCE_PT;
     let mut cells: Vec<TableCell> = tracks
         .iter()
@@ -504,13 +494,13 @@ fn cells_from_raw_items_with_tracks(
                 let idx = covered[0];
                 push_text(&mut cells[idx].text, &span.text);
                 cells[idx].end_x = cells[idx].end_x.max(x1);
-                if is_bold_span(span) {
+                if is_bold_item(span) {
                     cells[idx].bold = true;
                 }
             }
             _ => {
                 let pieces = split_span_at_anchors(span, &covered, tracks)?;
-                let bold = is_bold_span(span);
+                let bold = is_bold_item(span);
                 for (idx, piece) in covered.iter().zip(pieces.iter()) {
                     if piece.is_empty() {
                         return None;
@@ -629,7 +619,7 @@ fn try_detect_table_inferred(
     start_idx: usize,
     floor: usize,
 ) -> Option<TableRun> {
-    let dbgt = std::env::var("LITEPARSE_DEBUG_TABLE").is_ok();
+    let dbgt = *super::flags::DEBUG_TABLE;
     let seed_txt: String = lines[start_idx]
         .spans
         .iter()
@@ -1013,7 +1003,7 @@ fn try_detect_table(lines: &[ProjectedLine], start_idx: usize, floor: usize) -> 
         return None;
     }
 
-    if std::env::var("LITEPARSE_DEBUG_TABLE").is_ok() {
+    if *super::flags::DEBUG_TABLE {
         eprintln!(
             "[tbl-detect @{start_idx}..{end}] cols={column_count} header={header:?} rows={}",
             body_rows.len()
@@ -1041,7 +1031,7 @@ fn absorb_header_lines(
     column_count: usize,
     floor: usize,
 ) -> Option<(usize, Vec<String>)> {
-    let dbgt = std::env::var("LITEPARSE_DEBUG_TABLE").is_ok();
+    let dbgt = *super::flags::DEBUG_TABLE;
     let mut absorbed: Vec<Vec<TableCell>> = Vec::new();
     let mut j = start_idx;
     while j > floor {
@@ -1570,10 +1560,10 @@ const TABLE_CLUSTER_MAX_FAILED_ROW_FRAC: f32 = 0.3;
 const TABLE_CLUSTER_MAX_HEADER_LINES: usize = 4;
 
 fn merge_fragmented_table_clusters(runs: Vec<TableRun>, lines: &[ProjectedLine]) -> Vec<TableRun> {
-    if runs.len() < 2 || std::env::var("LITEPARSE_DISABLE_CLUSTER_MERGE").is_ok() {
+    if runs.len() < 2 || *super::flags::DISABLE_CLUSTER_MERGE {
         return runs;
     }
-    let dbgt = std::env::var("LITEPARSE_DEBUG_TABLE").is_ok();
+    let dbgt = *super::flags::DEBUG_TABLE;
     let mut out: Vec<TableRun> = Vec::with_capacity(runs.len());
     let mut i = 0;
     while i < runs.len() {
@@ -1644,7 +1634,7 @@ fn cluster_adjacent(a: &TableRun, b: &TableRun, lines: &[ProjectedLine]) -> bool
     // a 4-col transaction table) do not. Without this gate the union merge
     // fuses them and shreds both. Require ≥75% of the narrower run's tracks
     // to align to the wider run's tracks.
-    let dbgt = std::env::var("LITEPARSE_DEBUG_TABLE").is_ok();
+    let dbgt = *super::flags::DEBUG_TABLE;
     let (Some(a_tracks), Some(b_tracks)) = (run_body_tracks(a, lines), run_body_tracks(b, lines))
     else {
         // Inferred-path runs often have no line whose split_cells count
@@ -1877,7 +1867,7 @@ fn build_union_table(
     lines: &[ProjectedLine],
     floor: usize,
 ) -> Option<TableRun> {
-    let dbgt = std::env::var("LITEPARSE_DEBUG_TABLE").is_ok();
+    let dbgt = *super::flags::DEBUG_TABLE;
     let window_start = cluster.first()?.body_start;
     let window_end = cluster.last()?.end.min(lines.len());
     if window_start >= window_end {
@@ -1951,8 +1941,7 @@ fn build_union_table(
     // boundaries, or label-column row anchoring).
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut failed_count = 0usize;
-    for idx in window_start..window_end {
-        let line = &lines[idx];
+    for line in &lines[window_start..window_end] {
         if let Some(cells) = cells_from_raw_items_with_tracks(line, &tracks) {
             if cells.iter().any(|c| !c.text.is_empty()) {
                 rows.push(cells.into_iter().map(|c| c.text).collect());
@@ -2559,7 +2548,7 @@ fn build_ruled_table(
     page_height: f32,
     global: bool,
 ) -> Option<(TableRun, Vec<usize>)> {
-    let dbg = std::env::var("LITEPARSE_DEBUG_RULED").is_ok();
+    let dbg = *super::flags::DEBUG_RULED;
     let mut xs: Vec<f32> = v_indices.iter().map(|&i| vs[i].x).collect();
     xs.sort_by(|a, b| a.total_cmp(b));
     // Coarser, mean-centered clustering for column boundaries: cell-border
@@ -2671,11 +2660,11 @@ fn build_ruled_table(
     let mut span_total = 0usize;
     let mut span_straddle = 0usize;
 
-    let mut push_cell = |cells: &mut Vec<Vec<String>>,
-                         cell_has_text: &mut Vec<Vec<bool>>,
-                         row: usize,
-                         col: usize,
-                         txt: &str| {
+    let push_cell = |cells: &mut Vec<Vec<String>>,
+                     cell_has_text: &mut Vec<Vec<bool>>,
+                     row: usize,
+                     col: usize,
+                     txt: &str| {
         let txt = txt.trim();
         if txt.is_empty() {
             return;
@@ -2836,10 +2825,7 @@ fn build_ruled_table(
     if dbg {
         eprintln!("[ruled]   straddle {span_straddle}/{span_total} = {straddle_frac:.2}");
     }
-    if span_total >= 6
-        && straddle_frac > 0.45
-        && std::env::var("LITEPARSE_DISABLE_STRADDLE_GUARD").is_err()
-    {
+    if span_total >= 6 && straddle_frac > 0.45 && !*super::flags::DISABLE_STRADDLE_GUARD {
         if dbg {
             eprintln!("[ruled]   REJECT straddle-frac {straddle_frac:.2}");
         }
@@ -3359,9 +3345,16 @@ fn detect_ruled_tables_impl(
     let components = find_grid_components(&hs, &vs);
     let mut out = Vec::new();
     for (h_idx, v_idx) in components {
-        if let Some(run) =
-            build_ruled_table(&hs, &vs, &h_idx, &v_idx, lines, page_width, page_height, global)
-        {
+        if let Some(run) = build_ruled_table(
+            &hs,
+            &vs,
+            &h_idx,
+            &v_idx,
+            lines,
+            page_width,
+            page_height,
+            global,
+        ) {
             out.push(run);
         }
     }

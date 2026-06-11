@@ -3,14 +3,8 @@ use crate::types::{ProjectedLine, TextItem};
 
 use super::paragraphs::{collapse_whitespace, dehyphenate_join};
 
-/// Lightweight bold detection on a raw `TextItem`. Delegates to
-/// `projection::is_bold_item` so per-span and per-line logic stay in sync.
-pub(super) fn is_bold_span(s: &TextItem) -> bool {
-    is_bold_item(s)
-}
-
 /// Per-span style flags used by the inline-emphasis renderer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct SpanStyle {
     pub(super) bold: bool,
     pub(super) italic: bool,
@@ -52,7 +46,7 @@ pub(super) fn escape_inline(s: &str) -> String {
 /// Wrap `inner` with the markdown markers for `style`. Mono wins over bold/italic:
 /// inline code (`` `…` ``) doesn't compose with emphasis in CommonMark, so when
 /// a span is mono we drop the `**/*` wrap. Bold + italic → `***…***`.
-pub(super) fn apply_style(inner: &str, style: SpanStyle) -> String {
+fn apply_style(inner: &str, style: SpanStyle) -> String {
     if style.mono {
         // Use backticks; if inner already contains backticks, switch to a
         // longer fence (pair of backticks plus a space buffer) per CommonMark.
@@ -176,7 +170,7 @@ pub(super) fn render_list_item_text(line: &ProjectedLine, marker: &str, rest: &s
 /// Try to strip a leading list marker (optionally wrapped in emphasis markers)
 /// off `s`. Recognizes `***MARK*** `, `**MARK** `, `*MARK* `, `` `MARK` ``,
 /// and bare `MARK `. Returns the suffix on a match.
-pub(super) fn strip_leading_marker_from_inline(s: &str, marker: &str) -> Option<String> {
+fn strip_leading_marker_from_inline(s: &str, marker: &str) -> Option<String> {
     for wrap in ["***", "**", "*", "`"] {
         let prefix = format!("{wrap}{marker}{wrap} ");
         if let Some(rest) = s.strip_prefix(&prefix) {

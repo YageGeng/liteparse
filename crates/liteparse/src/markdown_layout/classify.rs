@@ -74,7 +74,7 @@ pub fn classify_page_with_filters(
     image_mode: crate::config::ImageMode,
     chrome_indices: &std::collections::HashSet<usize>,
 ) -> Vec<Block> {
-    let debug = std::env::var("LITEPARSE_DEBUG_MD").is_ok();
+    let debug = *super::flags::DEBUG_MD;
 
     // TOC suppression: when ≥3 lines on this page look like TOC entries
     // (alpha body + trailing page-number), demote heading promotion so each
@@ -160,7 +160,7 @@ pub fn classify_page_with_filters(
     let mut global_ruled_tables: Vec<(f32, Block)> = Vec::new();
     let mut global_ruled_consumed: std::collections::HashSet<usize> =
         std::collections::HashSet::new();
-    if std::env::var("LITEPARSE_DISABLE_GLOBAL_RULED").is_err() {
+    if !*super::flags::DISABLE_GLOBAL_RULED {
         for (run, consumed) in super::tables::detect_ruled_tables_global(
             lines,
             &page.graphics,
@@ -324,10 +324,7 @@ pub fn classify_page_with_filters(
     let push_interruption = |blocks: &mut Vec<Block>, kind: Interruption| {
         blocks.push(match kind {
             Interruption::Hr => Block::HorizontalRule,
-            Interruption::Figure(r) => Block::Figure {
-                id: r.id,
-                bbox: r.bbox,
-            },
+            Interruption::Figure(r) => Block::Figure { id: r.id },
             Interruption::Table(b) => b,
         });
     };
@@ -377,7 +374,6 @@ pub fn classify_page_with_filters(
             page,
             heading_map,
             outline,
-            image_mode,
             toc_page,
             debug,
             precomputed_tables,
@@ -395,7 +391,7 @@ pub fn classify_page_with_filters(
         interrupt_cursor += 1;
     }
 
-    return stitch_regions(blocks, &region_boundaries);
+    stitch_regions(blocks, &region_boundaries)
 }
 
 /// Classify the lines of a single xy_cut leaf into a sequence of blocks. All
@@ -411,12 +407,10 @@ fn classify_region(
     page: &ParsedPage,
     heading_map: &[(f32, u8)],
     outline: &[OutlineTarget],
-    image_mode: crate::config::ImageMode,
     toc_page: bool,
     debug: bool,
     precomputed_tables: Option<Vec<super::tables::TableRun>>,
 ) -> Vec<Block> {
-    let _ = image_mode; // interruption emission already gated upstream
     let mut blocks: Vec<Block> = Vec::new();
     let mut paragraph: Option<ParaAccum> = None;
     let mut code: Option<Vec<String>> = None;
@@ -502,10 +496,7 @@ fn classify_region(
             *last_line = None;
             blocks.push(match kind {
                 Interruption::Hr => Block::HorizontalRule,
-                Interruption::Figure(r) => Block::Figure {
-                    id: r.id,
-                    bbox: r.bbox,
-                },
+                Interruption::Figure(r) => Block::Figure { id: r.id },
                 Interruption::Table(b) => b,
             });
         }
@@ -629,7 +620,7 @@ fn classify_region(
             // A previous line ending in a mid-word hyphen wrap means this
             // line is its continuation regardless of capitalization
             // ("…SOLAR 10.7 Billion-" / "Parameter Model: We have…").
-            let prev_hyphen_wrap = std::env::var("LITEPARSE_DISABLE_HEADING_GUARDS").is_err()
+            let prev_hyphen_wrap = !*super::flags::DISABLE_HEADING_GUARDS
                 && prev.is_some_and(|p| {
                     let t = p.text.trim_end();
                     t.ends_with('-') && t.chars().rev().nth(1).is_some_and(|c| c.is_alphanumeric())
