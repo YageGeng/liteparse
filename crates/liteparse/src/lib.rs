@@ -14,6 +14,7 @@ pub use types::{ParsedPage, TextItem};
 // ── Modules with user-facing types (visible in docs) ───────────────────
 pub mod config;
 pub mod error;
+pub mod layout_merge;
 pub mod parser;
 pub mod search;
 pub mod types;

@@ -27,6 +27,14 @@ pub struct LiteParseConfig {
     pub quiet: bool,
     /// Number of concurrent OCR workers. Defaults to (number of CPU cores - 1), minimum 1.
     pub num_workers: usize,
+    /// Whether YOLO document layout detection is enabled.
+    pub layout_enabled: bool,
+    /// Minimum layout detection confidence score.
+    pub layout_confidence_threshold: f32,
+    /// IoU threshold used by layout detection non-maximum suppression.
+    pub layout_iou_threshold: f32,
+    /// Square image size used for YOLO layout inference.
+    pub layout_image_size: u32,
 }
 
 /// Supported output formats.
@@ -52,6 +60,10 @@ impl Default for LiteParseConfig {
             password: None,
             quiet: false,
             num_workers: default_num_workers(),
+            layout_enabled: false,
+            layout_confidence_threshold: 0.25,
+            layout_iou_threshold: 0.45,
+            layout_image_size: 1280,
         }
     }
 }
@@ -133,6 +145,10 @@ mod tests {
         assert!(!c.preserve_very_small_text);
         assert!(!c.quiet);
         assert!(c.password.is_none());
+        assert!(!c.layout_enabled);
+        assert_eq!(c.layout_confidence_threshold, 0.25);
+        assert_eq!(c.layout_iou_threshold, 0.45);
+        assert_eq!(c.layout_image_size, 1280);
     }
 
     #[test]

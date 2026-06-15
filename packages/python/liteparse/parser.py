@@ -8,6 +8,7 @@ from liteparse._liteparse import search_items as _native_search_items
 
 from .types import (
     LiteParseConfig,
+    LayoutBlock,
     ParsedPage,
     ParseError,
     ParseResult,
@@ -30,8 +31,22 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                 font_name=item.font_name,
                 font_size=item.font_size,
                 confidence=item.confidence,
+                layout_block_id=item.layout_block_id,
+                layout_label=item.layout_label,
             )
             for item in native_page.text_items
+        ]
+        layout_blocks = [
+            LayoutBlock(
+                id=block.id,
+                label=block.label,
+                confidence=block.confidence,
+                x=block.x,
+                y=block.y,
+                width=block.width,
+                height=block.height,
+            )
+            for block in native_page.layout_blocks
         ]
         pages.append(
             ParsedPage(
@@ -40,6 +55,7 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                 height=native_page.height,
                 text=native_page.text,
                 text_items=text_items,
+                layout_blocks=layout_blocks,
             )
         )
     return ParseResult(
@@ -76,6 +92,10 @@ class LiteParse:
         password: Optional[str] = None,
         quiet: Optional[bool] = None,
         num_workers: Optional[int] = None,
+        layout_enabled: Optional[bool] = None,
+        layout_confidence_threshold: Optional[float] = None,
+        layout_iou_threshold: Optional[float] = None,
+        layout_image_size: Optional[int] = None,
     ):
         """
         Initialize LiteParse parser.
@@ -93,6 +113,10 @@ class LiteParse:
             password: Password for encrypted/protected documents
             quiet: Suppress progress output
             num_workers: Number of concurrent OCR workers (default: CPU cores - 1)
+            layout_enabled: Whether to enable YOLO document layout detection
+            layout_confidence_threshold: Minimum layout detection confidence score
+            layout_iou_threshold: IoU threshold for layout detection NMS
+            layout_image_size: Square image size for layout detection
         """
         kwargs = {}
         if ocr_enabled is not None:
@@ -119,6 +143,14 @@ class LiteParse:
             kwargs["quiet"] = quiet
         if num_workers is not None:
             kwargs["num_workers"] = num_workers
+        if layout_enabled is not None:
+            kwargs["layout_enabled"] = layout_enabled
+        if layout_confidence_threshold is not None:
+            kwargs["layout_confidence_threshold"] = layout_confidence_threshold
+        if layout_iou_threshold is not None:
+            kwargs["layout_iou_threshold"] = layout_iou_threshold
+        if layout_image_size is not None:
+            kwargs["layout_image_size"] = layout_image_size
 
         self._native = _NativeLiteParse(**kwargs)
 
@@ -215,6 +247,10 @@ class LiteParse:
             password=cfg.password,
             quiet=cfg.quiet,
             num_workers=cfg.num_workers,
+            layout_enabled=cfg.layout_enabled,
+            layout_confidence_threshold=cfg.layout_confidence_threshold,
+            layout_iou_threshold=cfg.layout_iou_threshold,
+            layout_image_size=cfg.layout_image_size,
         )
 
     def __repr__(self) -> str:
@@ -253,6 +289,8 @@ def search_items(
             font_name=item.font_name,
             font_size=item.font_size,
             confidence=item.confidence,
+            layout_block_id=item.layout_block_id,
+            layout_label=item.layout_label,
         )
         for item in native_results
     ]

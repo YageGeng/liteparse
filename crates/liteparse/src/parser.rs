@@ -3,6 +3,7 @@ use crate::config::{LiteParseConfig, parse_target_pages};
 use crate::conversion;
 use crate::error::LiteParseError;
 use crate::extract;
+use crate::layout_merge;
 use crate::ocr::OcrEngine;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::ocr::http_simple::HttpOcrEngine;
@@ -12,7 +13,25 @@ use crate::ocr_merge;
 use crate::projection;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render;
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(
+        feature = "layout-yolo",
+        feature = "layout-yolo-metal",
+        feature = "layout-yolo-vulkan"
+    )
+))]
+use crate::types::LayoutBlock;
 use crate::types::{ParsedPage, PdfInput};
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(
+        feature = "layout-yolo",
+        feature = "layout-yolo-metal",
+        feature = "layout-yolo-vulkan"
+    )
+))]
+use liteparse_layout_yolo::{LayoutDetection, PageImage, YoloLayoutDetector, YoloLayoutOptions};
 use pdfium::Library;
 
 /// Result of parsing a document.
@@ -112,110 +131,281 @@ impl LiteParse {
             .transpose()
             .map_err(|e| format!("invalid --target-pages: {}", e))?;
 
-        // Extract text (and pre-render OCR pages in one PDF load when OCR is on).
-        //
-        // The PDFium lock is acquired for this entire critical section and
-        // released before any `.await` below — OCR (network / CPU) and grid
-        // projection (pure Rust) do not touch PDFium, so they can run
-        // concurrently with other `LiteParse` calls.
         let password = self.config.password.as_deref();
-        let (mut pages, ocr_rendered) = {
+        let page_numbers = {
             let lib = Library::init();
-            if self.config.ocr_enabled {
-                let document = extract::load_document_from_input(&lib, &validated_input, password)?;
-                let pages = extract::extract_pages_from_document(
-                    &document,
-                    target_pages.as_deref(),
-                    self.config.max_pages,
-                )?;
-                let t_extract = web_time::Instant::now();
-                log(&format!(
-                    "[liteparse] extract: {:.1}ms ({} pages)",
-                    t_extract.duration_since(t0).as_secs_f64() * 1000.0,
-                    pages.len()
-                ));
-                let rendered = ocr_merge::render_pages_for_ocr(&document, &pages, self.config.dpi)?;
-                log(&format!(
-                    "[liteparse] ocr render: {:.1}ms ({} pages)",
-                    web_time::Instant::now()
-                        .duration_since(t_extract)
-                        .as_secs_f64()
-                        * 1000.0,
-                    rendered.len()
-                ));
-                (pages, rendered)
-            } else {
-                let document = extract::load_document_from_input(&lib, &validated_input, password)?;
-                let pages = extract::extract_pages_from_document(
-                    &document,
-                    target_pages.as_deref(),
-                    self.config.max_pages,
-                )?;
-                log(&format!(
-                    "[liteparse] extract: {:.1}ms ({} pages)",
-                    web_time::Instant::now().duration_since(t0).as_secs_f64() * 1000.0,
-                    pages.len()
-                ));
-                (pages, Vec::new())
-            }
-            // `lib` is dropped here, releasing the PDFium lock.
+            let document = extract::load_document_from_input(&lib, &validated_input, password)?;
+            let page_count = document.page_count() as u32;
+            let mut page_numbers: Vec<u32> = (1..=page_count)
+                .filter(|page_number| {
+                    target_pages
+                        .as_ref()
+                        .is_none_or(|targets| targets.contains(page_number))
+                })
+                .take(self.config.max_pages)
+                .collect();
+            page_numbers.sort_unstable();
+            page_numbers
         };
-        let t1 = web_time::Instant::now();
 
-        // OCR pass
-        if self.config.ocr_enabled {
-            let engine: std::sync::Arc<dyn OcrEngine> = if let Some(e) =
-                self.ocr_engine_override.clone()
-            {
-                e
-            } else {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    if let Some(ref url) = self.config.ocr_server_url {
-                        std::sync::Arc::new(HttpOcrEngine::new(url.clone()))
+        let ocr_engine: Option<std::sync::Arc<dyn OcrEngine>> = if self.config.ocr_enabled {
+            Some(self.resolve_ocr_engine()?)
+        } else {
+            None
+        };
+
+        #[cfg(all(
+            not(target_arch = "wasm32"),
+            any(
+                feature = "layout-yolo",
+                feature = "layout-yolo-metal",
+                feature = "layout-yolo-vulkan"
+            )
+        ))]
+        let layout_detector = if self.config.layout_enabled {
+            Some(
+                YoloLayoutDetector::new(YoloLayoutOptions {
+                    confidence_threshold: self.config.layout_confidence_threshold,
+                    iou_threshold: self.config.layout_iou_threshold,
+                    image_size: self.config.layout_image_size,
+                })
+                .map_err(|e| LiteParseError::Other(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+
+        #[cfg(any(
+            target_arch = "wasm32",
+            not(any(
+                feature = "layout-yolo",
+                feature = "layout-yolo-metal",
+                feature = "layout-yolo-vulkan"
+            ))
+        ))]
+        if self.config.layout_enabled {
+            return Err(LiteParseError::Config(
+                "layout detection requires a YOLO layout feature".into(),
+            ));
+        }
+
+        let mut parsed_pages = Vec::with_capacity(page_numbers.len());
+
+        for page_number in page_numbers {
+            let page_start = web_time::Instant::now();
+            let page_index = page_number as i32 - 1;
+
+            let (mut page, ocr_rendered, layout_rendered) = {
+                let lib = Library::init();
+                let document = extract::load_document_from_input(&lib, &validated_input, password)?;
+                let page = extract::extract_page_from_document(&document, page_index)?;
+                let after_extract = web_time::Instant::now();
+                log(&format!(
+                    "[liteparse] page {} extract: {:.1}ms, items={}",
+                    page_number,
+                    after_extract.duration_since(page_start).as_secs_f64() * 1000.0,
+                    page.text_items.len()
+                ));
+
+                let ocr_rendered = if self.config.ocr_enabled {
+                    ocr_merge::render_pages_for_ocr(
+                        &document,
+                        std::slice::from_ref(&page),
+                        self.config.dpi,
+                    )?
+                } else {
+                    Vec::new()
+                };
+
+                let layout_rendered = if self.config.layout_enabled {
+                    if let Some(rendered) = ocr_rendered.first() {
+                        Some((
+                            rendered.rgb_bytes.clone(),
+                            rendered.width,
+                            rendered.height,
+                            page.page_width,
+                            page.page_height,
+                        ))
                     } else {
-                        #[cfg(feature = "tesseract")]
-                        {
-                            std::sync::Arc::new(TesseractOcrEngine::new(
-                                self.config.tessdata_path.clone(),
-                            ))
-                        }
-                        #[cfg(not(feature = "tesseract"))]
-                        {
-                            return Err("OCR enabled but no --ocr-server-url provided and tesseract feature is disabled".into());
-                        }
+                        let page_obj = document.page(page_index)?;
+                        let bitmap = page_obj.render(self.config.dpi)?;
+                        Some((
+                            bitmap.to_rgb(),
+                            bitmap.width() as u32,
+                            bitmap.height() as u32,
+                            page.page_width,
+                            page.page_height,
+                        ))
                     }
-                }
-                #[cfg(target_arch = "wasm32")]
+                } else {
+                    None
+                };
+
+                (page, ocr_rendered, layout_rendered)
+            };
+
+            let layout_started = web_time::Instant::now();
+            #[cfg(any(
+                target_arch = "wasm32",
+                not(any(
+                    feature = "layout-yolo",
+                    feature = "layout-yolo-metal",
+                    feature = "layout-yolo-vulkan"
+                ))
+            ))]
+            let _ = layout_rendered;
+
+            #[cfg(all(
+                not(target_arch = "wasm32"),
+                any(
+                    feature = "layout-yolo",
+                    feature = "layout-yolo-metal",
+                    feature = "layout-yolo-vulkan"
+                )
+            ))]
+            let layout_handle =
+                if let (Some(detector), Some((rgb, width, height, page_width, page_height))) =
+                    (layout_detector.clone(), layout_rendered)
                 {
-                    return Err(
-                        "OCR enabled but no `ocrEngine` callback was provided (WASM builds have no built-in OCR engine)".into(),
-                    );
+                    let dpi = self.config.dpi;
+                    Some(tokio::task::spawn_blocking(move || {
+                        let image = PageImage {
+                            rgb: &rgb,
+                            width,
+                            height,
+                            page_width,
+                            page_height,
+                            dpi,
+                        };
+                        detector
+                            .detect_page(&image)
+                            .map(layout_detections_to_blocks)
+                    }))
+                } else {
+                    None
+                };
+
+            #[cfg(any(
+                target_arch = "wasm32",
+                not(any(
+                    feature = "layout-yolo",
+                    feature = "layout-yolo-metal",
+                    feature = "layout-yolo-vulkan"
+                ))
+            ))]
+            let layout_handle: Option<
+                tokio::task::JoinHandle<Result<Vec<crate::types::LayoutBlock>, LiteParseError>>,
+            > = None;
+
+            let ocr_started = web_time::Instant::now();
+            if let Some(engine) = ocr_engine.clone() {
+                if ocr_rendered.is_empty() {
+                    log(&format!(
+                        "[liteparse] page {} ocr: 0.0ms, skipped",
+                        page_number
+                    ));
+                } else {
+                    let mut one_page = vec![page];
+                    ocr_merge::ocr_and_merge_rendered(
+                        &mut one_page,
+                        ocr_rendered,
+                        self.config.dpi,
+                        engine,
+                        &self.config.ocr_language,
+                        self.config.num_workers,
+                    )
+                    .await?;
+                    page = one_page.remove(0);
+                    log(&format!(
+                        "[liteparse] page {} ocr: {:.1}ms",
+                        page_number,
+                        web_time::Instant::now()
+                            .duration_since(ocr_started)
+                            .as_secs_f64()
+                            * 1000.0
+                    ));
+                }
+            } else {
+                log(&format!(
+                    "[liteparse] page {} ocr: 0.0ms, disabled",
+                    page_number
+                ));
+            }
+
+            let layout_blocks = match layout_handle {
+                Some(handle) => match handle.await {
+                    Ok(Ok(blocks)) => {
+                        log(&format!(
+                            "[liteparse] page {} layout: {:.1}ms, blocks={}",
+                            page_number,
+                            web_time::Instant::now()
+                                .duration_since(layout_started)
+                                .as_secs_f64()
+                                * 1000.0,
+                            blocks.len()
+                        ));
+                        blocks
+                    }
+                    Ok(Err(e)) => {
+                        return Err(LiteParseError::Other(format!(
+                            "layout detection failed on page {}: {}",
+                            page_number, e
+                        )));
+                    }
+                    Err(e) => {
+                        return Err(LiteParseError::Other(format!(
+                            "layout detection task failed on page {}: {}",
+                            page_number, e
+                        )));
+                    }
+                },
+                None => {
+                    log(&format!(
+                        "[liteparse] page {} layout: 0.0ms, {}",
+                        page_number,
+                        if self.config.layout_enabled {
+                            "unavailable"
+                        } else {
+                            "disabled"
+                        }
+                    ));
+                    Vec::new()
                 }
             };
-            ocr_merge::ocr_and_merge_rendered(
-                &mut pages,
-                ocr_rendered,
-                self.config.dpi,
-                engine,
-                &self.config.ocr_language,
-                self.config.num_workers,
-            )
-            .await?;
-        }
-        let t_ocr = web_time::Instant::now();
-        log(&format!(
-            "[liteparse] ocr: {:.1}ms",
-            t_ocr.duration_since(t1).as_secs_f64() * 1000.0
-        ));
 
-        // Grid projection
-        let parsed_pages = projection::project_pages_to_grid(pages);
+            let mut parsed_page = projection::project_pages_to_grid(vec![page])
+                .into_iter()
+                .next()
+                .ok_or_else(|| LiteParseError::Other("page projection produced no page".into()))?;
+            parsed_page.layout_blocks = layout_blocks;
+            layout_merge::assign_text_items_to_layout_blocks(
+                &mut parsed_page.text_items,
+                &parsed_page.layout_blocks,
+            );
+            let assigned = parsed_page
+                .text_items
+                .iter()
+                .filter(|item| item.layout_block_id.is_some())
+                .count();
+            log(&format!(
+                "[liteparse] page {} merge: text_items={}, assigned={}",
+                page_number,
+                parsed_page.text_items.len(),
+                assigned
+            ));
+            log(&format!(
+                "[liteparse] page {} total: {:.1}ms",
+                page_number,
+                web_time::Instant::now()
+                    .duration_since(page_start)
+                    .as_secs_f64()
+                    * 1000.0
+            ));
+
+            parsed_pages.push(parsed_page);
+        }
+
         let t2 = web_time::Instant::now();
-        log(&format!(
-            "[liteparse] project: {:.1}ms",
-            t2.duration_since(t_ocr).as_secs_f64() * 1000.0
-        ));
 
         let full_text = parsed_pages
             .iter()
@@ -230,6 +420,37 @@ impl LiteParse {
             pages: parsed_pages,
             text: full_text,
         })
+    }
+
+    fn resolve_ocr_engine(&self) -> Result<std::sync::Arc<dyn OcrEngine>, LiteParseError> {
+        if let Some(e) = self.ocr_engine_override.clone() {
+            return Ok(e);
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(ref url) = self.config.ocr_server_url {
+                Ok(std::sync::Arc::new(HttpOcrEngine::new(url.clone())))
+            } else {
+                #[cfg(feature = "tesseract")]
+                {
+                    Ok(std::sync::Arc::new(TesseractOcrEngine::new(
+                        self.config.tessdata_path.clone(),
+                    )))
+                }
+                #[cfg(not(feature = "tesseract"))]
+                {
+                    Err("OCR enabled but no --ocr-server-url provided and tesseract feature is disabled".into())
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Err(
+                "OCR enabled but no `ocrEngine` callback was provided (WASM builds have no built-in OCR engine)"
+                    .into(),
+            )
+        }
     }
 
     /// Generate screenshots of document pages as PNG bytes.
@@ -290,6 +511,36 @@ impl LiteParse {
     pub fn config(&self) -> &LiteParseConfig {
         &self.config
     }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(
+        feature = "layout-yolo",
+        feature = "layout-yolo-metal",
+        feature = "layout-yolo-vulkan"
+    )
+))]
+fn layout_detections_to_blocks(mut detections: Vec<LayoutDetection>) -> Vec<LayoutBlock> {
+    detections.sort_by(|a, b| {
+        a.y.partial_cmp(&b.y)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    detections
+        .into_iter()
+        .enumerate()
+        .map(|(id, detection)| LayoutBlock {
+            id,
+            label: detection.label,
+            confidence: detection.confidence,
+            x: detection.x,
+            y: detection.y,
+            width: detection.width,
+            height: detection.height,
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -372,7 +372,7 @@ Apache 2.0
 Built on top of:
 
 - [PDFium](https://pdfium.googlesource.com/pdfium/) - PDF rendering and text extraction
-- [Tesseract](https://github.com/tesseract-ocr/tesseract) - OCR engine (via tesseract-rs)
+- [Tesseract](https://github.com/tesseract-ocr/tesseract) - OCR engine (via `tesseract-rs`)
 - [EasyOCR](https://github.com/JaidedAI/EasyOCR) - HTTP OCR server (optional)
 - [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) - HTTP OCR server (optional)
 - [napi-rs](https://napi.rs/) - Node.js native bindings

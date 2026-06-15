@@ -48,6 +48,10 @@ struct JsLiteParseConfig {
     preserve_very_small_text: Option<bool>,
     password: Option<String>,
     quiet: Option<bool>,
+    layout_enabled: Option<bool>,
+    layout_confidence_threshold: Option<f32>,
+    layout_iou_threshold: Option<f32>,
+    layout_image_size: Option<u32>,
 }
 
 impl JsLiteParseConfig {
@@ -95,6 +99,18 @@ impl JsLiteParseConfig {
         if let Some(v) = self.quiet {
             cfg.quiet = v;
         }
+        if let Some(v) = self.layout_enabled {
+            cfg.layout_enabled = v;
+        }
+        if let Some(v) = self.layout_confidence_threshold {
+            cfg.layout_confidence_threshold = v;
+        }
+        if let Some(v) = self.layout_iou_threshold {
+            cfg.layout_iou_threshold = v;
+        }
+        if let Some(v) = self.layout_image_size {
+            cfg.layout_image_size = v;
+        }
         cfg.num_workers = 1;
         Ok(cfg)
     }
@@ -115,6 +131,10 @@ impl JsLiteParseConfig {
             preserve_very_small_text: Some(cfg.preserve_very_small_text),
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),
+            layout_enabled: Some(cfg.layout_enabled),
+            layout_confidence_threshold: Some(cfg.layout_confidence_threshold),
+            layout_iou_threshold: Some(cfg.layout_iou_threshold),
+            layout_image_size: Some(cfg.layout_image_size),
         }
     }
 }
@@ -137,6 +157,22 @@ struct JsTextItem<'a> {
     font_size: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layout_block_id: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layout_label: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsLayoutBlock<'a> {
+    id: usize,
+    label: &'a str,
+    confidence: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
 }
 
 #[derive(Serialize)]
@@ -147,6 +183,7 @@ struct JsParsedPage<'a> {
     height: f32,
     text: &'a str,
     text_items: Vec<JsTextItem<'a>>,
+    layout_blocks: Vec<JsLayoutBlock<'a>>,
 }
 
 #[derive(Serialize)]
@@ -328,6 +365,21 @@ impl LiteParse {
                         font_name: i.font_name.as_deref(),
                         font_size: i.font_size,
                         confidence: i.confidence,
+                        layout_block_id: i.layout_block_id,
+                        layout_label: i.layout_label.as_deref(),
+                    })
+                    .collect(),
+                layout_blocks: p
+                    .layout_blocks
+                    .iter()
+                    .map(|b| JsLayoutBlock {
+                        id: b.id,
+                        label: &b.label,
+                        confidence: b.confidence,
+                        x: b.x,
+                        y: b.y,
+                        width: b.width,
+                        height: b.height,
                     })
                     .collect(),
             })
@@ -361,6 +413,10 @@ struct JsSearchTextItem {
     font_size: Option<f32>,
     #[serde(default)]
     confidence: Option<f32>,
+    #[serde(default)]
+    layout_block_id: Option<usize>,
+    #[serde(default)]
+    layout_label: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -398,6 +454,8 @@ pub fn search_items(items: JsValue, options: JsValue) -> Result<JsValue, JsError
             font_name: i.font_name,
             font_size: i.font_size,
             confidence: i.confidence,
+            layout_block_id: i.layout_block_id,
+            layout_label: i.layout_label,
             ..Default::default()
         })
         .collect();
@@ -419,6 +477,8 @@ pub fn search_items(items: JsValue, options: JsValue) -> Result<JsValue, JsError
             font_name: i.font_name.as_deref(),
             font_size: i.font_size,
             confidence: i.confidence,
+            layout_block_id: i.layout_block_id,
+            layout_label: i.layout_label.as_deref(),
         })
         .collect();
 

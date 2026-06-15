@@ -28,6 +28,14 @@ export interface JsLiteParseConfig {
   quiet?: boolean
   /** Number of concurrent OCR workers (default: CPU cores - 1). */
   numWorkers?: number
+  /** Whether YOLO document layout detection is enabled. */
+  layoutEnabled?: boolean
+  /** Minimum layout detection confidence score. */
+  layoutConfidenceThreshold?: number
+  /** IoU threshold used by layout detection NMS. */
+  layoutIouThreshold?: number
+  /** Square image size used for layout detection. */
+  layoutImageSize?: number
 }
 export interface JsTextItem {
   text: string
@@ -38,6 +46,17 @@ export interface JsTextItem {
   fontName?: string
   fontSize?: number
   confidence?: number
+  layoutBlockId?: number
+  layoutLabel?: string
+}
+export interface JsLayoutBlock {
+  id: number
+  label: string
+  confidence: number
+  x: number
+  y: number
+  width: number
+  height: number
 }
 export interface JsParsedPage {
   pageNum: number
@@ -45,6 +64,7 @@ export interface JsParsedPage {
   height: number
   text: string
   textItems: Array<JsTextItem>
+  layoutBlocks: Array<JsLayoutBlock>
 }
 export interface JsParseResult {
   pages: Array<JsParsedPage>

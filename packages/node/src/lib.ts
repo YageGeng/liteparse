@@ -4,6 +4,7 @@ import {
   type LiteParseNativeConfig,
   type NativeParseResult,
   type NativeParsedPage,
+  type NativeLayoutBlock,
   type NativeTextItem,
 } from "./native.js";
 
@@ -27,6 +28,10 @@ export interface LiteParseConfig {
   password?: string;
   quiet: boolean;
   numWorkers: number;
+  layoutEnabled: boolean;
+  layoutConfidenceThreshold: number;
+  layoutIouThreshold: number;
+  layoutImageSize: number;
 }
 
 export interface TextItem {
@@ -38,6 +43,18 @@ export interface TextItem {
   fontName?: string;
   fontSize?: number;
   confidence?: number;
+  layoutBlockId?: number;
+  layoutLabel?: string;
+}
+
+export interface LayoutBlock {
+  id: number;
+  label: string;
+  confidence: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface ParsedPage {
@@ -46,6 +63,7 @@ export interface ParsedPage {
   height: number;
   text: string;
   textItems: TextItem[];
+  layoutBlocks: LayoutBlock[];
 }
 
 export interface ParseResult {
@@ -82,6 +100,10 @@ export class LiteParse {
       password: userConfig.password,
       quiet: userConfig.quiet,
       numWorkers: userConfig.numWorkers,
+      layoutEnabled: userConfig.layoutEnabled,
+      layoutConfidenceThreshold: userConfig.layoutConfidenceThreshold,
+      layoutIouThreshold: userConfig.layoutIouThreshold,
+      layoutImageSize: userConfig.layoutImageSize,
     };
 
     this._native = new native.LiteParse(nativeConfig);
@@ -101,6 +123,10 @@ export class LiteParse {
       password: resolved.password ?? undefined,
       quiet: resolved.quiet ?? false,
       numWorkers: resolved.numWorkers ?? 1,
+      layoutEnabled: resolved.layoutEnabled ?? false,
+      layoutConfidenceThreshold: resolved.layoutConfidenceThreshold ?? 0.25,
+      layoutIouThreshold: resolved.layoutIouThreshold ?? 0.45,
+      layoutImageSize: resolved.layoutImageSize ?? 1280,
     };
   }
 
@@ -145,6 +171,7 @@ function toPage(p: NativeParsedPage): ParsedPage {
     height: p.height,
     text: p.text,
     textItems: p.textItems.map(toTextItem),
+    layoutBlocks: p.layoutBlocks.map(toLayoutBlock),
   };
 }
 
@@ -158,6 +185,20 @@ function toTextItem(item: NativeTextItem): TextItem {
     fontName: item.fontName,
     fontSize: item.fontSize,
     confidence: item.confidence,
+    layoutBlockId: item.layoutBlockId,
+    layoutLabel: item.layoutLabel,
+  };
+}
+
+function toLayoutBlock(block: NativeLayoutBlock): LayoutBlock {
+  return {
+    id: block.id,
+    label: block.label,
+    confidence: block.confidence,
+    x: block.x,
+    y: block.y,
+    width: block.width,
+    height: block.height,
   };
 }
 

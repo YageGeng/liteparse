@@ -2,7 +2,7 @@ use napi_derive::napi;
 
 use liteparse::config::{LiteParseConfig, OutputFormat};
 use liteparse::parser::ParseResult;
-use liteparse::types::{ParsedPage, TextItem};
+use liteparse::types::{LayoutBlock, ParsedPage, TextItem};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -35,6 +35,14 @@ pub struct JsLiteParseConfig {
     pub quiet: Option<bool>,
     /// Number of concurrent OCR workers (default: CPU cores - 1).
     pub num_workers: Option<u32>,
+    /// Whether YOLO document layout detection is enabled.
+    pub layout_enabled: Option<bool>,
+    /// Minimum layout detection confidence score.
+    pub layout_confidence_threshold: Option<f64>,
+    /// IoU threshold used by layout detection NMS.
+    pub layout_iou_threshold: Option<f64>,
+    /// Square image size used for layout detection.
+    pub layout_image_size: Option<u32>,
 }
 
 impl JsLiteParseConfig {
@@ -79,6 +87,18 @@ impl JsLiteParseConfig {
         if let Some(v) = self.num_workers {
             cfg.num_workers = v as usize;
         }
+        if let Some(v) = self.layout_enabled {
+            cfg.layout_enabled = v;
+        }
+        if let Some(v) = self.layout_confidence_threshold {
+            cfg.layout_confidence_threshold = v as f32;
+        }
+        if let Some(v) = self.layout_iou_threshold {
+            cfg.layout_iou_threshold = v as f32;
+        }
+        if let Some(v) = self.layout_image_size {
+            cfg.layout_image_size = v;
+        }
         cfg
     }
 
@@ -99,6 +119,10 @@ impl JsLiteParseConfig {
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),
             num_workers: Some(cfg.num_workers as u32),
+            layout_enabled: Some(cfg.layout_enabled),
+            layout_confidence_threshold: Some(cfg.layout_confidence_threshold as f64),
+            layout_iou_threshold: Some(cfg.layout_iou_threshold as f64),
+            layout_image_size: Some(cfg.layout_image_size),
         }
     }
 }
@@ -118,6 +142,8 @@ pub struct JsTextItem {
     pub font_name: Option<String>,
     pub font_size: Option<f64>,
     pub confidence: Option<f64>,
+    pub layout_block_id: Option<u32>,
+    pub layout_label: Option<String>,
 }
 
 impl JsTextItem {
@@ -131,6 +157,8 @@ impl JsTextItem {
             font_name: self.font_name.clone(),
             font_size: self.font_size.map(|v| v as f32),
             confidence: self.confidence.map(|v| v as f32),
+            layout_block_id: self.layout_block_id.map(|v| v as usize),
+            layout_label: self.layout_label.clone(),
             ..Default::default()
         }
     }
@@ -145,6 +173,38 @@ impl JsTextItem {
             font_name: item.font_name.clone(),
             font_size: item.font_size.map(|v| v as f64),
             confidence: item.confidence.map(|v| v as f64).or(Some(1.0)),
+            layout_block_id: item.layout_block_id.map(|v| v as u32),
+            layout_label: item.layout_label.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LayoutBlock
+// ---------------------------------------------------------------------------
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsLayoutBlock {
+    pub id: u32,
+    pub label: String,
+    pub confidence: f64,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl JsLayoutBlock {
+    pub fn from_rust(block: &LayoutBlock) -> Self {
+        Self {
+            id: block.id as u32,
+            label: block.label.clone(),
+            confidence: block.confidence as f64,
+            x: block.x as f64,
+            y: block.y as f64,
+            width: block.width as f64,
+            height: block.height as f64,
         }
     }
 }
@@ -161,6 +221,7 @@ pub struct JsParsedPage {
     pub height: f64,
     pub text: String,
     pub text_items: Vec<JsTextItem>,
+    pub layout_blocks: Vec<JsLayoutBlock>,
 }
 
 impl JsParsedPage {
@@ -171,6 +232,11 @@ impl JsParsedPage {
             height: page.page_height as f64,
             text: page.text.clone(),
             text_items: page.text_items.iter().map(JsTextItem::from_rust).collect(),
+            layout_blocks: page
+                .layout_blocks
+                .iter()
+                .map(JsLayoutBlock::from_rust)
+                .collect(),
         }
     }
 }

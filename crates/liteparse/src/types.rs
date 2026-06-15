@@ -58,10 +58,32 @@ pub struct TextItem {
     /// OCR confidence score (0.0–1.0). None for native PDF text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
+    /// Page-local layout block id assigned after layout detection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout_block_id: Option<usize>,
+    /// Layout label assigned after layout detection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout_label: Option<String>,
+}
+
+/// A detected document layout block on a page.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LayoutBlock {
+    /// Stable page-local id assigned after reading-order sorting.
+    pub id: usize,
+    /// Layout class label, e.g. "text", "table", or "title".
+    pub label: String,
+    /// Detection confidence score (0.0–1.0).
+    pub confidence: f32,
+    /// Viewport-space coordinates (top-left origin, 72 DPI).
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 #[doc(hidden)]
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Page {
     pub page_number: usize,
     pub page_width: f32,
@@ -77,6 +99,7 @@ pub struct ParsedPage {
     pub page_height: f32,
     pub text: String,
     pub text_items: Vec<TextItem>,
+    pub layout_blocks: Vec<LayoutBlock>,
 }
 
 #[doc(hidden)]

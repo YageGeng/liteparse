@@ -1,6 +1,7 @@
 from .parser import LiteParse, search_items
 from .types import (
     LiteParseConfig,
+    LayoutBlock,
     ParseResult,
     ParsedPage,
     TextItem,
@@ -12,6 +13,7 @@ __version__ = "2.0.0"
 __all__ = [
     "LiteParse",
     "LiteParseConfig",
+    "LayoutBlock",
     "ParseResult",
     "ParsedPage",
     "TextItem",

@@ -167,7 +167,7 @@ Key files in `crates/liteparse/src/`:
 
 ## Related Documentation
 
-- [User-facing documentation](README.md)
+- [User-facing documentation](./README.md)
 - [OCR API Specification](OCR_API_SPEC.md)
 - [WASM package README](packages/wasm/README.md)
 - [Python package README](packages/python/README.md)

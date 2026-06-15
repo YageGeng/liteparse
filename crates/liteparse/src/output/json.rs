@@ -1,4 +1,4 @@
-use crate::types::ParsedPage;
+use crate::types::{LayoutBlock, ParsedPage, TextItem};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -17,12 +17,25 @@ pub(crate) struct JsonTextItem {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct JsonLayoutBlock {
+    pub id: usize,
+    pub label: String,
+    pub confidence: f32,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub text: String,
+    pub text_items: Vec<JsonTextItem>,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct JsonPage {
     pub page: usize,
     pub width: f32,
     pub height: f32,
     pub text: String,
-    pub text_items: Vec<JsonTextItem>,
+    pub layout_blocks: Vec<JsonLayoutBlock>,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,22 +53,51 @@ pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
                 width: page.page_width,
                 height: page.page_height,
                 text: page.text.clone(),
-                text_items: page
-                    .text_items
+                layout_blocks: page
+                    .layout_blocks
                     .iter()
-                    .map(|item| JsonTextItem {
-                        text: item.text.clone(),
-                        x: item.x,
-                        y: item.y,
-                        width: item.width,
-                        height: item.height,
-                        font_name: item.font_name.clone(),
-                        font_size: item.font_size,
-                        confidence: item.confidence.or(Some(1.0)),
-                    })
+                    .map(|block| layout_block_to_json(block, &page.text_items))
                     .collect(),
             })
             .collect(),
+    }
+}
+
+fn layout_block_to_json(block: &LayoutBlock, text_items: &[TextItem]) -> JsonLayoutBlock {
+    let text_items: Vec<JsonTextItem> = text_items
+        .iter()
+        .filter(|item| item.layout_block_id == Some(block.id))
+        .map(text_item_to_json)
+        .collect();
+    let text = text_items
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    JsonLayoutBlock {
+        id: block.id,
+        label: block.label.clone(),
+        confidence: block.confidence,
+        x: block.x,
+        y: block.y,
+        width: block.width,
+        height: block.height,
+        text,
+        text_items,
+    }
+}
+
+fn text_item_to_json(item: &TextItem) -> JsonTextItem {
+    JsonTextItem {
+        text: item.text.clone(),
+        x: item.x,
+        y: item.y,
+        width: item.width,
+        height: item.height,
+        font_name: item.font_name.clone(),
+        font_size: item.font_size,
+        confidence: item.confidence.or(Some(1.0)),
     }
 }
 
@@ -68,7 +110,7 @@ pub fn format_json(pages: &[ParsedPage]) -> Result<String, serde_json::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ParsedPage, TextItem};
+    use crate::types::{LayoutBlock, ParsedPage, TextItem};
 
     fn item(text: &str, conf: Option<f32>) -> TextItem {
         TextItem {
@@ -91,6 +133,19 @@ mod tests {
             page_height: 792.0,
             text: "txt".into(),
             text_items: items,
+            layout_blocks: vec![],
+        }
+    }
+
+    fn layout_block() -> LayoutBlock {
+        LayoutBlock {
+            id: 2,
+            label: "table".into(),
+            confidence: 0.875,
+            x: 10.0,
+            y: 20.0,
+            width: 100.0,
+            height: 50.0,
         }
     }
 
@@ -99,27 +154,81 @@ mod tests {
         let j = build_json(&[page(vec![item("hi", None)])]);
         assert_eq!(j.pages.len(), 1);
         assert_eq!(j.pages[0].page, 1);
-        assert_eq!(j.pages[0].text_items[0].confidence, Some(1.0));
-        assert_eq!(j.pages[0].text_items[0].font_name.as_deref(), Some("Helv"));
+        assert!(j.pages[0].layout_blocks.is_empty());
     }
 
     #[test]
     fn test_build_json_preserves_ocr_confidence() {
-        let j = build_json(&[page(vec![item("hi", Some(0.42))])]);
-        assert_eq!(j.pages[0].text_items[0].confidence, Some(0.42));
+        let mut text_item = item("hi", Some(0.42));
+        text_item.layout_block_id = Some(2);
+        text_item.layout_label = Some("table".into());
+        let mut page = page(vec![text_item]);
+        page.layout_blocks = vec![layout_block()];
+
+        let j = build_json(&[page]);
+
+        assert_eq!(
+            j.pages[0].layout_blocks[0].text_items[0].confidence,
+            Some(0.42)
+        );
     }
 
     #[test]
     fn test_format_json_pretty() {
         let s = format_json(&[page(vec![item("hi", None)])]).unwrap();
         assert!(s.contains("\n"));
-        assert!(s.contains("\"text\": \"hi\""));
+        assert!(s.contains("\"text\": \"txt\""));
         assert!(s.contains("\"page\": 1"));
+        assert!(!s.contains("\"text_items\": ["));
     }
 
     #[test]
     fn test_build_json_empty() {
         let j = build_json(&[]);
         assert!(j.pages.is_empty());
+    }
+
+    #[test]
+    fn test_build_json_includes_layout_fields() {
+        let mut text_item = item("hi", None);
+        text_item.layout_block_id = Some(2);
+        text_item.layout_label = Some("table".into());
+
+        let mut page = page(vec![text_item]);
+        page.layout_blocks = vec![layout_block()];
+
+        let s = format_json(&[page]).unwrap();
+        assert!(s.contains("\"layout_blocks\""));
+        assert!(s.contains("\"label\": \"table\""));
+        assert!(s.contains("\"text_items\""));
+        assert!(s.contains("\"text\": \"hi\""));
+        assert!(!s.contains("\"layout_block_id\""));
+        assert!(!s.contains("\"layout_label\""));
+    }
+
+    #[test]
+    fn test_build_json_nests_text_items_under_matching_layout_blocks() {
+        let mut first = item("first", None);
+        first.layout_block_id = Some(2);
+        first.layout_label = Some("table".into());
+        let mut second = item("second", Some(0.5));
+        second.layout_block_id = Some(2);
+        second.layout_label = Some("table".into());
+        let mut unassigned = item("outside", None);
+        unassigned.layout_block_id = None;
+
+        let mut page = page(vec![first, second, unassigned]);
+        page.layout_blocks = vec![layout_block()];
+
+        let j = build_json(&[page]);
+
+        assert_eq!(j.pages[0].layout_blocks[0].text_items.len(), 2);
+        assert_eq!(j.pages[0].layout_blocks[0].text_items[0].text, "first");
+        assert_eq!(
+            j.pages[0].layout_blocks[0].text_items[1].confidence,
+            Some(0.5)
+        );
+        let s = serde_json::to_string(&j.pages[0]).unwrap();
+        assert!(!s.contains("\"text_items\":[{\"text\":\"outside\""));
     }
 }

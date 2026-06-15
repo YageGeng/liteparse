@@ -78,6 +78,22 @@ struct ParseCommand {
     #[arg(long)]
     preserve_small_text: bool,
 
+    /// Enable YOLO document layout detection
+    #[arg(long)]
+    layout: bool,
+
+    /// Minimum layout detection confidence score
+    #[arg(long, default_value = "0.25")]
+    layout_confidence_threshold: f32,
+
+    /// IoU threshold for layout detection NMS
+    #[arg(long, default_value = "0.45")]
+    layout_iou_threshold: f32,
+
+    /// Square image size for layout detection
+    #[arg(long, default_value = "1280")]
+    layout_image_size: u32,
+
     /// Password for encrypted/protected documents
     #[arg(long)]
     password: Option<String>,
@@ -153,6 +169,22 @@ struct BatchParseCommand {
     #[arg(long, default_value = "150")]
     dpi: f32,
 
+    /// Enable YOLO document layout detection
+    #[arg(long)]
+    layout: bool,
+
+    /// Minimum layout detection confidence score
+    #[arg(long, default_value = "0.25")]
+    layout_confidence_threshold: f32,
+
+    /// IoU threshold for layout detection NMS
+    #[arg(long, default_value = "0.45")]
+    layout_iou_threshold: f32,
+
+    /// Square image size for layout detection
+    #[arg(long, default_value = "1280")]
+    layout_image_size: u32,
+
     /// Recursively search input directory
     #[arg(long)]
     recursive: bool,
@@ -213,6 +245,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 password: cmd.password,
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
+                layout_enabled: cmd.layout,
+                layout_confidence_threshold: cmd.layout_confidence_threshold,
+                layout_iou_threshold: cmd.layout_iou_threshold,
+                layout_image_size: cmd.layout_image_size,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -295,6 +331,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 password: cmd.password,
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
+                layout_enabled: cmd.layout,
+                layout_confidence_threshold: cmd.layout_confidence_threshold,
+                layout_iou_threshold: cmd.layout_iou_threshold,
+                layout_image_size: cmd.layout_image_size,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {

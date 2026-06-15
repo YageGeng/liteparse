@@ -2713,6 +2713,7 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
                         ..proj.item
                     })
                     .collect(),
+                layout_blocks: Vec::new(),
             }
         })
         .collect()

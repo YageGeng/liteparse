@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/pdfium-sys",
     "crates/pdfium",
+    "crates/liteparse-layout-yolo",
     "crates/liteparse",
     "crates/liteparse-napi",
     "crates/liteparse-python",

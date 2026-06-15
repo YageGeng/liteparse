@@ -32,6 +32,10 @@ export interface LiteParseNativeConfig {
   password?: string;
   quiet?: boolean;
   numWorkers?: number;
+  layoutEnabled?: boolean;
+  layoutConfidenceThreshold?: number;
+  layoutIouThreshold?: number;
+  layoutImageSize?: number;
 }
 
 export interface NativeTextItem {
@@ -43,6 +47,18 @@ export interface NativeTextItem {
   fontName?: string;
   fontSize?: number;
   confidence?: number;
+  layoutBlockId?: number;
+  layoutLabel?: string;
+}
+
+export interface NativeLayoutBlock {
+  id: number;
+  label: string;
+  confidence: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface NativeParsedPage {
@@ -51,6 +67,7 @@ export interface NativeParsedPage {
   height: number;
   text: string;
   textItems: NativeTextItem[];
+  layoutBlocks: NativeLayoutBlock[];
 }
 
 export interface NativeParseResult {

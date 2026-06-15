@@ -58,25 +58,33 @@ pub(crate) fn extract_pages_from_document(
             break;
         }
 
-        let page = document.page(page_index)?;
-        let text_page = page.text()?;
-        let view_box = page.view_box().unwrap_or(RectF {
-            left: 0.0,
-            top: page.height(),
-            right: page.width(),
-            bottom: 0.0,
-        });
-        let text_items = extract_page_text_items(&page, &text_page, &view_box)?;
-
-        pages.push(LitePage {
-            page_number: page_number as usize,
-            page_width: page.width(),
-            page_height: page.height(),
-            text_items,
-        });
+        pages.push(extract_page_from_document(document, page_index)?);
     }
 
     Ok(pages)
+}
+
+/// Extract one page from an already-open PDFium document.
+pub(crate) fn extract_page_from_document(
+    document: &Document,
+    page_index: i32,
+) -> Result<LitePage, LiteParseError> {
+    let page = document.page(page_index)?;
+    let text_page = page.text()?;
+    let view_box = page.view_box().unwrap_or(RectF {
+        left: 0.0,
+        top: page.height(),
+        right: page.width(),
+        bottom: 0.0,
+    });
+    let text_items = extract_page_text_items(&page, &text_page, &view_box)?;
+
+    Ok(LitePage {
+        page_number: page_index as usize + 1,
+        page_width: page.width(),
+        page_height: page.height(),
+        text_items,
+    })
 }
 
 /// Extract raw text items and print each page as a JSON-line object to stdout.
@@ -826,6 +834,7 @@ impl SegmentBuilder {
                 fill_color: self.fill_color.clone(),
                 stroke_color: self.stroke_color.clone(),
                 confidence: None,
+                ..Default::default()
             });
         }
 

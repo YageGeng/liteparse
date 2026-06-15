@@ -14,7 +14,7 @@
 |
 [文档](https://developers.llamaindex.ai/liteparse/)
 
-[English](README.md) | 简体中文
+[English](./README.md) | 简体中文
 
 <img src="https://github.com/user-attachments/assets/07ba6a82-6bb1-4dea-b0ef-cad7df7d1622" alt="out" width="600">
 
@@ -369,7 +369,7 @@ Apache 2.0
 LiteParse 构建在以下项目之上：
 
 - [PDFium](https://pdfium.googlesource.com/pdfium/) —— PDF 渲染与文本提取
-- [Tesseract](https://github.com/tesseract-ocr/tesseract) —— OCR 引擎（通过 tesseract-rs 接入）
+- [Tesseract](https://github.com/tesseract-ocr/tesseract) —— OCR 引擎（通过 `tesseract-rs` 接入）
 - [EasyOCR](https://github.com/JaidedAI/EasyOCR) —— HTTP OCR 服务（可选）
 - [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) —— HTTP OCR 服务（可选）
 - [napi-rs](https://napi.rs/) —— Node.js 原生绑定

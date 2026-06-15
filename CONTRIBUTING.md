@@ -196,7 +196,7 @@ For other bugs:
 
 - Open a [Discussion](https://github.com/run-llama/liteparse/discussions) for questions
 - Check existing issues before opening new ones
-- Read the [README](README.md) for usage documentation
+- Read the [README](./README.md) for usage documentation
 
 ## License
 

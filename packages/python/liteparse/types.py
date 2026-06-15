@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterator, List, Optional
+from typing import List, Optional
 
 
 @dataclass
 class TextItem:
     """Individual text item extracted from a document."""
+
     text: str
     x: float
     y: float
@@ -17,21 +18,39 @@ class TextItem:
     font_name: Optional[str] = None
     font_size: Optional[float] = None
     confidence: Optional[float] = None
+    layout_block_id: Optional[int] = None
+    layout_label: Optional[str] = None
+
+
+@dataclass
+class LayoutBlock:
+    """Detected document layout block on a page."""
+
+    id: int
+    label: str
+    confidence: float
+    x: float
+    y: float
+    width: float
+    height: float
 
 
 @dataclass
 class ParsedPage:
     """A parsed page from a document."""
+
     page_num: int
     width: float
     height: float
     text: str
     text_items: List[TextItem] = field(default_factory=list)
+    layout_blocks: List[LayoutBlock] = field(default_factory=list)
 
 
 @dataclass
 class ParseResult:
     """Result of parsing a document."""
+
     pages: List[ParsedPage]
     text: str
 
@@ -50,6 +69,7 @@ class ParseResult:
 @dataclass
 class ScreenshotResult:
     """Result of a single page screenshot."""
+
     page_num: int
     width: int
     height: int
@@ -59,6 +79,7 @@ class ScreenshotResult:
 @dataclass
 class LiteParseConfig:
     """Resolved parser configuration."""
+
     ocr_language: str
     ocr_enabled: bool
     ocr_server_url: Optional[str]
@@ -71,8 +92,13 @@ class LiteParseConfig:
     password: Optional[str]
     quiet: bool
     num_workers: int
+    layout_enabled: bool
+    layout_confidence_threshold: float
+    layout_iou_threshold: float
+    layout_image_size: int
 
 
 class ParseError(Exception):
     """Exception raised when parsing fails."""
+
     pass
