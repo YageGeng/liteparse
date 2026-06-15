@@ -19,9 +19,15 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "wasm-pack build ../../crates/liteparse-wasm --release --target web --out-dir ../../packages/wasm/pkg --out-name liteparse_wasm && node scripts/patch-wasi-imports.js",
-    "build:bundler": "wasm-pack build ../../crates/liteparse-wasm --release --target bundler --out-dir ../../packages/wasm/pkg --out-name liteparse_wasm && node scripts/patch-wasi-imports.js",
-    "build:nodejs": "wasm-pack build ../../crates/liteparse-wasm --release --target nodejs --out-dir ../../packages/wasm/pkg --out-name liteparse_wasm && node scripts/patch-wasi-imports.js",
+    "build": "node scripts/build.js web",
+    "build:layout-yolo": "node scripts/build.js web layout-yolo",
+    "build:layout-yolo-webgpu": "node scripts/build.js web layout-yolo-webgpu",
+    "build:bundler": "node scripts/build.js bundler",
+    "build:bundler:layout-yolo": "node scripts/build.js bundler layout-yolo",
+    "build:bundler:layout-yolo-webgpu": "node scripts/build.js bundler layout-yolo-webgpu",
+    "build:nodejs": "node scripts/build.js nodejs",
+    "build:nodejs:layout-yolo": "node scripts/build.js nodejs layout-yolo",
+    "build:nodejs:layout-yolo-webgpu": "node scripts/build.js nodejs layout-yolo-webgpu",
     "clean": "rm -rf pkg",
     "prepublishOnly": "npm run build"
   },

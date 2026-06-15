@@ -4,6 +4,13 @@ use crate::conversion;
 use crate::error::LiteParseError;
 use crate::extract;
 use crate::layout_merge;
+#[cfg(any(
+    feature = "layout-yolo",
+    feature = "layout-yolo-metal",
+    feature = "layout-yolo-vulkan",
+    feature = "layout-yolo-webgpu"
+))]
+use crate::layout_yolo::{LayoutDetector, RenderedLayoutPage};
 use crate::ocr::OcrEngine;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::ocr::http_simple::HttpOcrEngine;
@@ -13,25 +20,7 @@ use crate::ocr_merge;
 use crate::projection;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render;
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(
-        feature = "layout-yolo",
-        feature = "layout-yolo-metal",
-        feature = "layout-yolo-vulkan"
-    )
-))]
-use crate::types::LayoutBlock;
 use crate::types::{ParsedPage, PdfInput};
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(
-        feature = "layout-yolo",
-        feature = "layout-yolo-metal",
-        feature = "layout-yolo-vulkan"
-    )
-))]
-use liteparse_layout_yolo::{LayoutDetection, PageImage, YoloLayoutDetector, YoloLayoutOptions};
 use pdfium::Library;
 
 /// Result of parsing a document.
@@ -154,35 +143,26 @@ impl LiteParse {
             None
         };
 
+        #[cfg(all(target_arch = "wasm32", feature = "layout-yolo-webgpu"))]
+        let layout_detector = LayoutDetector::from_config_async(&self.config).await?;
+
         #[cfg(all(
-            not(target_arch = "wasm32"),
+            not(all(target_arch = "wasm32", feature = "layout-yolo-webgpu")),
             any(
                 feature = "layout-yolo",
                 feature = "layout-yolo-metal",
-                feature = "layout-yolo-vulkan"
+                feature = "layout-yolo-vulkan",
+                feature = "layout-yolo-webgpu"
             )
         ))]
-        let layout_detector = if self.config.layout_enabled {
-            Some(
-                YoloLayoutDetector::new(YoloLayoutOptions {
-                    confidence_threshold: self.config.layout_confidence_threshold,
-                    iou_threshold: self.config.layout_iou_threshold,
-                    image_size: self.config.layout_image_size,
-                })
-                .map_err(|e| LiteParseError::Other(e.to_string()))?,
-            )
-        } else {
-            None
-        };
+        let layout_detector = LayoutDetector::from_config(&self.config)?;
 
-        #[cfg(any(
-            target_arch = "wasm32",
-            not(any(
-                feature = "layout-yolo",
-                feature = "layout-yolo-metal",
-                feature = "layout-yolo-vulkan"
-            ))
-        ))]
+        #[cfg(not(any(
+            feature = "layout-yolo",
+            feature = "layout-yolo-metal",
+            feature = "layout-yolo-vulkan",
+            feature = "layout-yolo-webgpu"
+        )))]
         if self.config.layout_enabled {
             return Err(LiteParseError::Config(
                 "layout detection requires a YOLO layout feature".into(),
@@ -195,7 +175,7 @@ impl LiteParse {
             let page_start = web_time::Instant::now();
             let page_index = page_number as i32 - 1;
 
-            let (mut page, ocr_rendered, layout_rendered) = {
+            let (mut page, ocr_rendered, layout_rendered_for_detection) = {
                 let lib = Library::init();
                 let document = extract::load_document_from_input(&lib, &validated_input, password)?;
                 let page = extract::extract_page_from_document(&document, page_index)?;
@@ -217,9 +197,15 @@ impl LiteParse {
                     Vec::new()
                 };
 
+                #[cfg(any(
+                    feature = "layout-yolo",
+                    feature = "layout-yolo-metal",
+                    feature = "layout-yolo-vulkan",
+                    feature = "layout-yolo-webgpu"
+                ))]
                 let layout_rendered = if self.config.layout_enabled {
                     if let Some(rendered) = ocr_rendered.first() {
-                        Some((
+                        Some(RenderedLayoutPage::new(
                             rendered.rgb_bytes.clone(),
                             rendered.width,
                             rendered.height,
@@ -229,7 +215,7 @@ impl LiteParse {
                     } else {
                         let page_obj = document.page(page_index)?;
                         let bitmap = page_obj.render(self.config.dpi)?;
-                        Some((
+                        Some(RenderedLayoutPage::new(
                             bitmap.to_rgb(),
                             bitmap.width() as u32,
                             bitmap.height() as u32,
@@ -241,58 +227,53 @@ impl LiteParse {
                     None
                 };
 
+                #[cfg(not(any(
+                    feature = "layout-yolo",
+                    feature = "layout-yolo-metal",
+                    feature = "layout-yolo-vulkan",
+                    feature = "layout-yolo-webgpu"
+                )))]
+                let layout_rendered: Option<()> = None;
+
                 (page, ocr_rendered, layout_rendered)
             };
 
             let layout_started = web_time::Instant::now();
-            #[cfg(any(
-                target_arch = "wasm32",
-                not(any(
-                    feature = "layout-yolo",
-                    feature = "layout-yolo-metal",
-                    feature = "layout-yolo-vulkan"
-                ))
-            ))]
-            let _ = layout_rendered;
+            #[cfg(not(any(
+                feature = "layout-yolo",
+                feature = "layout-yolo-metal",
+                feature = "layout-yolo-vulkan",
+                feature = "layout-yolo-webgpu"
+            )))]
+            let _ = layout_rendered_for_detection;
 
             #[cfg(all(
                 not(target_arch = "wasm32"),
                 any(
                     feature = "layout-yolo",
                     feature = "layout-yolo-metal",
-                    feature = "layout-yolo-vulkan"
+                    feature = "layout-yolo-vulkan",
+                    feature = "layout-yolo-webgpu"
                 )
             ))]
-            let layout_handle =
-                if let (Some(detector), Some((rgb, width, height, page_width, page_height))) =
-                    (layout_detector.clone(), layout_rendered)
-                {
-                    let dpi = self.config.dpi;
-                    Some(tokio::task::spawn_blocking(move || {
-                        let image = PageImage {
-                            rgb: &rgb,
-                            width,
-                            height,
-                            page_width,
-                            page_height,
-                            dpi,
-                        };
-                        detector
-                            .detect_page(&image)
-                            .map(layout_detections_to_blocks)
-                    }))
-                } else {
-                    None
-                };
+            let layout_handle = if let (Some(detector), Some(rendered)) = (
+                layout_detector.clone(),
+                layout_rendered_for_detection.clone(),
+            ) {
+                let dpi = self.config.dpi;
+                Some(tokio::task::spawn_blocking(move || {
+                    detector.detect_rendered(rendered, dpi)
+                }))
+            } else {
+                None
+            };
 
-            #[cfg(any(
-                target_arch = "wasm32",
-                not(any(
-                    feature = "layout-yolo",
-                    feature = "layout-yolo-metal",
-                    feature = "layout-yolo-vulkan"
-                ))
-            ))]
+            #[cfg(not(any(
+                feature = "layout-yolo",
+                feature = "layout-yolo-metal",
+                feature = "layout-yolo-vulkan",
+                feature = "layout-yolo-webgpu"
+            )))]
             let layout_handle: Option<
                 tokio::task::JoinHandle<Result<Vec<crate::types::LayoutBlock>, LiteParseError>>,
             > = None;
@@ -332,6 +313,102 @@ impl LiteParse {
                 ));
             }
 
+            #[cfg(all(target_arch = "wasm32", feature = "layout-yolo-webgpu"))]
+            let layout_blocks = if let (Some(detector), Some(rendered)) = (
+                layout_detector.clone(),
+                layout_rendered_for_detection.clone(),
+            ) {
+                match detector
+                    .detect_rendered_async(rendered, self.config.dpi)
+                    .await
+                {
+                    Ok(blocks) => {
+                        log(&format!(
+                            "[liteparse] page {} layout: {:.1}ms, blocks={}",
+                            page_number,
+                            web_time::Instant::now()
+                                .duration_since(layout_started)
+                                .as_secs_f64()
+                                * 1000.0,
+                            blocks.len()
+                        ));
+                        blocks
+                    }
+                    Err(e) => {
+                        return Err(LiteParseError::Other(format!(
+                            "layout detection failed on page {}: {}",
+                            page_number, e
+                        )));
+                    }
+                }
+            } else {
+                log(&format!(
+                    "[liteparse] page {} layout: 0.0ms, {}",
+                    page_number,
+                    if self.config.layout_enabled {
+                        "unavailable"
+                    } else {
+                        "disabled"
+                    }
+                ));
+                Vec::new()
+            };
+
+            #[cfg(all(
+                target_arch = "wasm32",
+                not(feature = "layout-yolo-webgpu"),
+                any(
+                    feature = "layout-yolo",
+                    feature = "layout-yolo-metal",
+                    feature = "layout-yolo-vulkan"
+                )
+            ))]
+            let layout_blocks = if let (Some(detector), Some(rendered)) = (
+                layout_detector.clone(),
+                layout_rendered_for_detection.clone(),
+            ) {
+                match detector.detect_rendered(rendered, self.config.dpi) {
+                    Ok(blocks) => {
+                        log(&format!(
+                            "[liteparse] page {} layout: {:.1}ms, blocks={}",
+                            page_number,
+                            web_time::Instant::now()
+                                .duration_since(layout_started)
+                                .as_secs_f64()
+                                * 1000.0,
+                            blocks.len()
+                        ));
+                        blocks
+                    }
+                    Err(e) => {
+                        return Err(LiteParseError::Other(format!(
+                            "layout detection failed on page {}: {}",
+                            page_number, e
+                        )));
+                    }
+                }
+            } else {
+                log(&format!(
+                    "[liteparse] page {} layout: 0.0ms, {}",
+                    page_number,
+                    if self.config.layout_enabled {
+                        "unavailable"
+                    } else {
+                        "disabled"
+                    }
+                ));
+                Vec::new()
+            };
+
+            #[cfg(not(all(
+                target_arch = "wasm32",
+                any(
+                    feature = "layout-yolo",
+                    feature = "layout-yolo-metal",
+                    feature = "layout-yolo-vulkan",
+                    feature = "layout-yolo-webgpu"
+                )
+            )))]
             let layout_blocks = match layout_handle {
                 Some(handle) => match handle.await {
                     Ok(Ok(blocks)) => {
@@ -381,6 +458,10 @@ impl LiteParse {
             layout_merge::assign_text_items_to_layout_blocks(
                 &mut parsed_page.text_items,
                 &parsed_page.layout_blocks,
+            );
+            layout_merge::compact_layout_blocks(
+                &mut parsed_page.layout_blocks,
+                &mut parsed_page.text_items,
             );
             let assigned = parsed_page
                 .text_items
@@ -511,36 +592,6 @@ impl LiteParse {
     pub fn config(&self) -> &LiteParseConfig {
         &self.config
     }
-}
-
-#[cfg(all(
-    not(target_arch = "wasm32"),
-    any(
-        feature = "layout-yolo",
-        feature = "layout-yolo-metal",
-        feature = "layout-yolo-vulkan"
-    )
-))]
-fn layout_detections_to_blocks(mut detections: Vec<LayoutDetection>) -> Vec<LayoutBlock> {
-    detections.sort_by(|a, b| {
-        a.y.partial_cmp(&b.y)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
-    });
-
-    detections
-        .into_iter()
-        .enumerate()
-        .map(|(id, detection)| LayoutBlock {
-            id,
-            label: detection.label,
-            confidence: detection.confidence,
-            x: detection.x,
-            y: detection.y,
-            width: detection.width,
-            height: detection.height,
-        })
-        .collect()
 }
 
 #[cfg(test)]

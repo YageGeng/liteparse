@@ -43,7 +43,8 @@ pub fn search_items(items: &[TextItem], options: &SearchOptions) -> Vec<TextItem
         let mut combined = String::new();
         let mut found = false;
 
-        for end in start..items.len() {
+        let mut end = start;
+        while end < items.len() {
             if end > start {
                 combined.push_str(seps[end]);
             }
@@ -98,6 +99,8 @@ pub fn search_items(items: &[TextItem], options: &SearchOptions) -> Vec<TextItem
             if combined.len() > q.len() * 2 {
                 break;
             }
+
+            end += 1;
         }
 
         if !found {

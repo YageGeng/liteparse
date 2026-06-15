@@ -11,6 +11,7 @@ default = ["backend-ndarray"]
 backend-ndarray = []
 backend-metal = ["dep:burn-wgpu", "burn-wgpu/metal"]
 backend-vulkan = ["dep:burn-wgpu", "burn-wgpu/vulkan"]
+backend-webgpu = ["dep:burn-wgpu", "burn-wgpu/webgpu", "dep:tokio"]
 
 [dependencies]
 burn = { package = "burn-core", version = "0.21", default-features = false, features = ["std"] }
@@ -20,6 +21,10 @@ burn-store = { version = "0.21", default-features = false, features = ["std", "b
 burn-wgpu = { version = "0.21", default-features = false, features = ["std"], optional = true }
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2"
+tokio = { version = "1.52.3", default-features = false, features = ["sync"], optional = true }
 
 [build-dependencies]
 burn-onnx = "=0.21.0"
+
+[dev-dependencies]
+serde_json = "1.0.145"

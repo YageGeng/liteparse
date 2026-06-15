@@ -7,18 +7,22 @@
 
 mod wasi_stubs;
 
-use std::pin::Pin;
-
 use js_sys::{Function, Reflect, Uint8Array};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
 use liteparse::config::{LiteParseConfig, OutputFormat};
-use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult};
+use liteparse::ocr::{OcrEngine, OcrFuture, OcrOptions, OcrResult};
 use liteparse::parser::LiteParse as CoreLiteParse;
 use liteparse::search;
-use liteparse::types::PdfInput;
+use liteparse::types::{LayoutBlock, PdfInput, TextItem};
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = log)]
+    fn console_log(message: &str);
+}
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -163,6 +167,24 @@ struct JsTextItem<'a> {
     layout_label: Option<&'a str>,
 }
 
+impl<'a> JsTextItem<'a> {
+    /// Create a JS-facing text item from a core text item.
+    fn from_rust(item: &'a TextItem) -> Self {
+        Self {
+            text: &item.text,
+            x: item.x,
+            y: item.y,
+            width: item.width,
+            height: item.height,
+            font_name: item.font_name.as_deref(),
+            font_size: item.font_size,
+            confidence: item.confidence,
+            layout_block_id: item.layout_block_id,
+            layout_label: item.layout_label.as_deref(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct JsLayoutBlock<'a> {
@@ -173,6 +195,36 @@ struct JsLayoutBlock<'a> {
     y: f32,
     width: f32,
     height: f32,
+    text: String,
+    text_items: Vec<JsTextItem<'a>>,
+}
+
+impl<'a> JsLayoutBlock<'a> {
+    /// Create a JS-facing layout block with the text items assigned to it.
+    fn from_rust(block: &'a LayoutBlock, text_items: &'a [TextItem]) -> Self {
+        let text_items: Vec<JsTextItem<'a>> = text_items
+            .iter()
+            .filter(|item| item.layout_block_id == Some(block.id))
+            .map(JsTextItem::from_rust)
+            .collect();
+        let text = text_items
+            .iter()
+            .map(|item| item.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Self {
+            id: block.id,
+            label: &block.label,
+            confidence: block.confidence,
+            x: block.x,
+            y: block.y,
+            width: block.width,
+            height: block.height,
+            text,
+            text_items,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -227,12 +279,7 @@ impl OcrEngine for JsOcrEngine {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
-                + '_,
-        >,
-    > {
+    ) -> OcrFuture<'a> {
         // Copy bytes into a JS Uint8Array up-front (must happen on the
         // current thread anyway in wasm).
         let arr = Uint8Array::new_with_length(image_data.len() as u32);
@@ -300,6 +347,50 @@ pub struct LiteParse {
 
 #[wasm_bindgen]
 impl LiteParse {
+    /// Return the compiled layout backend name for this Wasm package.
+    fn compiled_layout_backend() -> &'static str {
+        #[cfg(feature = "layout-yolo-webgpu")]
+        {
+            "webgpu"
+        }
+        #[cfg(all(not(feature = "layout-yolo-webgpu"), feature = "layout-yolo"))]
+        {
+            "ndarray"
+        }
+        #[cfg(not(any(feature = "layout-yolo-webgpu", feature = "layout-yolo")))]
+        {
+            "none"
+        }
+    }
+
+    /// Return whether this Wasm package was compiled with any YOLO layout feature.
+    fn has_compiled_layout() -> bool {
+        cfg!(any(feature = "layout-yolo-webgpu", feature = "layout-yolo"))
+    }
+
+    /// Write one LiteParse diagnostic line to the browser console.
+    fn log_diagnostic(message: &str) {
+        console_log(message);
+    }
+
+    /// Write the compiled layout backend and runtime layout setting to the browser console.
+    fn log_layout_state(stage: &str, config: &LiteParseConfig) {
+        Self::log_diagnostic(&format!(
+            "[liteparse-wasm] {stage}: yoloCompiled={}, yoloBackend={}, layoutEnabled={}, confidenceThreshold={}, iouThreshold={}, imageSize={}",
+            Self::has_compiled_layout(),
+            Self::compiled_layout_backend(),
+            config.layout_enabled,
+            config.layout_confidence_threshold,
+            config.layout_iou_threshold,
+            config.layout_image_size,
+        ));
+    }
+
+    /// Format a parse result with the same JSON formatter used by the CLI.
+    fn format_cli_json(result: &liteparse::ParseResult) -> Result<String, serde_json::Error> {
+        liteparse::output::json::format_json(&result.pages)
+    }
+
     /// Construct a new parser. `config` is a JS object (all fields optional).
     /// If `config.ocrEngine` is present, it is wired up as the OCR backend.
     #[wasm_bindgen(constructor)]
@@ -323,6 +414,7 @@ impl LiteParse {
         if let Some(js_engine) = ocr_engine_js {
             parser = parser.with_ocr_engine(std::sync::Arc::new(JsOcrEngine::new(js_engine)));
         }
+        Self::log_layout_state("new", &core_cfg);
         Ok(LiteParse {
             inner: parser,
             config: core_cfg,
@@ -339,11 +431,23 @@ impl LiteParse {
 
     /// Parse PDF bytes. Returns `Promise<ParseResult>`.
     pub async fn parse(&self, data: Vec<u8>) -> Result<JsValue, JsError> {
+        Self::log_layout_state("parse:start", &self.config);
         let result = self
             .inner
             .parse_input(PdfInput::Bytes(data))
             .await
             .map_err(|e| JsError::new(&format!("parse failed: {}", e)))?;
+        let page_layout_counts = result
+            .pages
+            .iter()
+            .map(|page| page.layout_blocks.len().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        Self::log_diagnostic(&format!(
+            "[liteparse-wasm] parse:done pages={}, layoutBlocksPerPage=[{}]",
+            result.pages.len(),
+            page_layout_counts,
+        ));
 
         let js_pages: Vec<JsParsedPage<'_>> = result
             .pages
@@ -353,34 +457,11 @@ impl LiteParse {
                 width: p.page_width,
                 height: p.page_height,
                 text: &p.text,
-                text_items: p
-                    .text_items
-                    .iter()
-                    .map(|i| JsTextItem {
-                        text: &i.text,
-                        x: i.x,
-                        y: i.y,
-                        width: i.width,
-                        height: i.height,
-                        font_name: i.font_name.as_deref(),
-                        font_size: i.font_size,
-                        confidence: i.confidence,
-                        layout_block_id: i.layout_block_id,
-                        layout_label: i.layout_label.as_deref(),
-                    })
-                    .collect(),
+                text_items: p.text_items.iter().map(JsTextItem::from_rust).collect(),
                 layout_blocks: p
                     .layout_blocks
                     .iter()
-                    .map(|b| JsLayoutBlock {
-                        id: b.id,
-                        label: &b.label,
-                        confidence: b.confidence,
-                        x: b.x,
-                        y: b.y,
-                        width: b.width,
-                        height: b.height,
-                    })
+                    .map(|b| JsLayoutBlock::from_rust(b, &p.text_items))
                     .collect(),
             })
             .collect();
@@ -392,6 +473,31 @@ impl LiteParse {
 
         serde_wasm_bindgen::to_value(&js_result)
             .map_err(|e| JsError::new(&format!("serialize result failed: {}", e)))
+    }
+
+    /// Parse PDF bytes and return the same JSON string produced by the CLI JSON output.
+    #[wasm_bindgen(js_name = parseJson)]
+    pub async fn parse_json(&self, data: Vec<u8>) -> Result<String, JsError> {
+        Self::log_layout_state("parseJson:start", &self.config);
+        let result = self
+            .inner
+            .parse_input(PdfInput::Bytes(data))
+            .await
+            .map_err(|e| JsError::new(&format!("parse failed: {}", e)))?;
+        let page_layout_counts = result
+            .pages
+            .iter()
+            .map(|page| page.layout_blocks.len().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        Self::log_diagnostic(&format!(
+            "[liteparse-wasm] parseJson:done pages={}, layoutBlocksPerPage=[{}]",
+            result.pages.len(),
+            page_layout_counts,
+        ));
+
+        Self::format_cli_json(&result)
+            .map_err(|e| JsError::new(&format!("serialize CLI JSON failed: {}", e)))
     }
 }
 
@@ -466,22 +572,84 @@ pub fn search_items(items: JsValue, options: JsValue) -> Result<JsValue, JsError
     };
 
     let results = search::search_items(&rust_items, &options);
-    let js_results: Vec<JsTextItem<'_>> = results
-        .iter()
-        .map(|i| JsTextItem {
-            text: &i.text,
-            x: i.x,
-            y: i.y,
-            width: i.width,
-            height: i.height,
-            font_name: i.font_name.as_deref(),
-            font_size: i.font_size,
-            confidence: i.confidence,
-            layout_block_id: i.layout_block_id,
-            layout_label: i.layout_label.as_deref(),
-        })
-        .collect();
+    let js_results: Vec<JsTextItem<'_>> = results.iter().map(JsTextItem::from_rust).collect();
 
     serde_wasm_bindgen::to_value(&js_results)
         .map_err(|e| JsError::new(&format!("serialize results failed: {}", e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ensures the Wasm JSON path uses the same snake_case schema as the CLI formatter.
+    #[test]
+    fn cli_json_formatter_uses_cli_layout_schema() {
+        let mut text_item = TextItem {
+            text: "hello".to_string(),
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+            layout_block_id: Some(9),
+            layout_label: Some("Text".to_string()),
+            ..Default::default()
+        };
+        text_item.confidence = Some(0.8);
+        let result = liteparse::ParseResult {
+            pages: vec![liteparse::types::ParsedPage {
+                page_number: 1,
+                page_width: 612.0,
+                page_height: 792.0,
+                text: "hello".to_string(),
+                text_items: vec![text_item],
+                layout_blocks: vec![LayoutBlock {
+                    id: 9,
+                    label: "Text".to_string(),
+                    confidence: 0.9,
+                    x: 1.0,
+                    y: 2.0,
+                    width: 3.0,
+                    height: 4.0,
+                }],
+            }],
+            text: "hello".to_string(),
+        };
+
+        let json = LiteParse::format_cli_json(&result).expect("CLI JSON should serialize");
+
+        assert!(json.contains("\"layout_blocks\""));
+        assert!(!json.contains("\"layoutBlocks\""));
+    }
+
+    /// Ensures layout blocks expose the text items assigned to that block.
+    #[test]
+    fn js_layout_block_serializes_nested_text_items() {
+        let block = JsLayoutBlock {
+            id: 7,
+            label: "Text",
+            confidence: 0.9,
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+            text: "hello".to_string(),
+            text_items: vec![JsTextItem {
+                text: "hello",
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+                font_name: None,
+                font_size: None,
+                confidence: None,
+                layout_block_id: Some(7),
+                layout_label: Some("Text"),
+            }],
+        };
+
+        let value = serde_json::to_value(&block).expect("layout block should serialize");
+
+        assert_eq!(value["textItems"][0]["text"], "hello");
+    }
 }

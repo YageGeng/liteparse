@@ -80,7 +80,8 @@ fn patch_generated_model(mut source: String) -> String {
     }
 
     source = insert_index_helpers(source);
-    replace_class_count_initializer(source)
+    source = replace_class_count_initializer(source);
+    replace_wasm_webgpu_topk_postprocess(source)
 }
 
 fn replace_generated_header(source: String) -> String {
@@ -104,17 +105,31 @@ fn insert_index_helpers(source: String) -> String {
     }
 
     let helpers = r#"
-#[cfg(feature = "backend-ndarray")]
+#[cfg(all(
+    feature = "backend-ndarray",
+    not(any(
+        feature = "backend-metal",
+        feature = "backend-vulkan",
+        feature = "backend-webgpu"
+    ))
+))]
 fn yolo_index_dtype() -> burn::tensor::DType {
     burn::tensor::DType::I64
 }
 
-#[cfg(any(feature = "backend-metal", feature = "backend-vulkan"))]
+#[cfg(any(feature = "backend-metal", feature = "backend-vulkan", feature = "backend-webgpu"))]
 fn yolo_index_dtype() -> burn::tensor::DType {
     burn::tensor::DType::I32
 }
 
-#[cfg(feature = "backend-ndarray")]
+#[cfg(all(
+    feature = "backend-ndarray",
+    not(any(
+        feature = "backend-metal",
+        feature = "backend-vulkan",
+        feature = "backend-webgpu"
+    ))
+))]
 fn class_count_tensor<B: Backend>(device: &B::Device) -> Tensor<B, 1, Int> {
     Tensor::<B, 1, Int>::from_data(
         burn::tensor::TensorData::from([11i64]),
@@ -122,7 +137,7 @@ fn class_count_tensor<B: Backend>(device: &B::Device) -> Tensor<B, 1, Int> {
     )
 }
 
-#[cfg(any(feature = "backend-metal", feature = "backend-vulkan"))]
+#[cfg(any(feature = "backend-metal", feature = "backend-vulkan", feature = "backend-webgpu"))]
 fn class_count_tensor<B: Backend>(device: &B::Device) -> Tensor<B, 1, Int> {
     Tensor::<B, 1, Int>::from_data(
         burn::tensor::TensorData::from([11i32]),
@@ -150,5 +165,32 @@ fn replace_class_count_initializer(mut source: String) -> String {
         start..end,
         "move |device, _require_grad| class_count_tensor::<B>(device),",
     );
+    source
+}
+
+/// Returns raw candidates before Burn's TopK nodes on browser WebGPU builds.
+fn replace_wasm_webgpu_topk_postprocess(mut source: String) -> String {
+    let Some(start) = source
+        .find("        let split_tensors = transpose5_out1.split_with_sizes([4, 11].into(), 2);")
+    else {
+        return source;
+    };
+    let Some(relative_end) = source[start..].find("        concat24_out1\n    }\n}") else {
+        return source;
+    };
+    let end = start + relative_end + "        concat24_out1\n".len();
+    let original = source[start..end].to_owned();
+    let replacement = format!(
+        r#"        #[cfg(all(target_family = "wasm", feature = "backend-webgpu"))]
+        {{
+            // CONTEXT: Burn WebGPU cannot execute generated TopK on wasm yet.
+            transpose5_out1
+        }}
+        #[cfg(not(all(target_family = "wasm", feature = "backend-webgpu")))]
+        {{
+{original}        }}
+"#
+    );
+    source.replace_range(start..end, &replacement);
     source
 }

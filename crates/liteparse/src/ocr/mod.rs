@@ -29,6 +29,18 @@ pub struct OcrOptions {
     pub dpi: f32,
 }
 
+/// Error type returned by OCR engines.
+pub type OcrError = Box<dyn std::error::Error + Send + Sync>;
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Future returned by native OCR engines.
+pub type OcrFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<OcrResult>, OcrError>> + Send + 'a>>;
+
+#[cfg(target_arch = "wasm32")]
+/// Future returned by browser OCR engines.
+pub type OcrFuture<'a> = Pin<Box<dyn Future<Output = Result<Vec<OcrResult>, OcrError>> + 'a>>;
+
 /// On native targets, `OcrEngine` and its returned futures must be `Send` so
 /// they can be moved across thread boundaries by the multi-threaded tokio
 /// runtime. On wasm32 there is only a single thread and JS-backed engines
@@ -43,13 +55,7 @@ pub trait OcrEngine: Send + Sync {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
-                + Send
-                + '_,
-        >,
-    >;
+    ) -> OcrFuture<'a>;
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -61,12 +67,7 @@ pub trait OcrEngine: Send + Sync {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
-                + '_,
-        >,
-    >;
+    ) -> OcrFuture<'a>;
 }
 
 #[cfg(test)]
@@ -84,14 +85,7 @@ mod tests {
             _width: u32,
             _height: u32,
             options: &'b OcrOptions,
-        ) -> Pin<
-            Box<
-                dyn Future<
-                        Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>,
-                    > + Send
-                    + '_,
-            >,
-        > {
+        ) -> OcrFuture<'a> {
             Box::pin(async move {
                 Ok(vec![OcrResult {
                     text: format!("lang={}", options.language),

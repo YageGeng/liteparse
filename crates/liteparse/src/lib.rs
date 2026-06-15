@@ -25,6 +25,14 @@ pub mod types;
 pub mod conversion;
 #[doc(hidden)]
 pub mod extract;
+#[cfg(any(
+    feature = "layout-yolo",
+    feature = "layout-yolo-metal",
+    feature = "layout-yolo-vulkan",
+    feature = "layout-yolo-webgpu"
+))]
+#[doc(hidden)]
+mod layout_yolo;
 #[doc(hidden)]
 pub mod ocr;
 #[doc(hidden)]

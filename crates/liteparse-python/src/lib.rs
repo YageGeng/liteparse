@@ -332,6 +332,10 @@ struct LiteParse {
 #[pymethods]
 impl LiteParse {
     #[new]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "PyO3 constructor mirrors the public keyword-only Python API"
+    )]
     #[pyo3(signature = (
         *,
         ocr_language = None,

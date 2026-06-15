@@ -1,4 +1,4 @@
-use std::{io::Cursor, pin::Pin, time::Duration};
+use std::{io::Cursor, time::Duration};
 
 use image::ImageFormat;
 use reqwest::{
@@ -7,7 +7,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::ocr::{OcrEngine, OcrOptions, OcrResult};
+use crate::ocr::{OcrEngine, OcrFuture, OcrOptions, OcrResult};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HttpOcrResponseItem {
@@ -57,13 +57,7 @@ impl OcrEngine for HttpOcrEngine {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
-                + Send
-                + '_,
-        >,
-    > {
+    ) -> OcrFuture<'a> {
         Box::pin(async move {
             // Encode raw RGB bytes as PNG for the server
             let img: image::RgbImage =

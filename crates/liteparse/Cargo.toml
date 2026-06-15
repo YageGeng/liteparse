@@ -19,6 +19,7 @@ default = ["tesseract"]
 layout-yolo = ["dep:liteparse-layout-yolo", "liteparse-layout-yolo/backend-ndarray"]
 layout-yolo-metal = ["dep:liteparse-layout-yolo", "liteparse-layout-yolo/backend-metal"]
 layout-yolo-vulkan = ["dep:liteparse-layout-yolo", "liteparse-layout-yolo/backend-vulkan"]
+layout-yolo-webgpu = ["dep:liteparse-layout-yolo", "liteparse-layout-yolo/backend-webgpu"]
 tesseract = ["dep:tesseract-rs"]
 
 [dependencies]
@@ -41,6 +42,10 @@ web-time = "1.1.0"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1.52.3", features = ["rt-multi-thread", "fs", "process"] }
+fontdue = "0.9"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4.2", default-features = false, features = ["wasm_js"] }
 
 [dev-dependencies]
 serial_test = "3"

@@ -137,7 +137,11 @@ impl<'doc, 'lib: 'doc> Page<'doc, 'lib> {
         // Fill with white (ARGB: 0xFFFFFFFF)
         bitmap.fill_rect(0, 0, width, height, 0xFFFFFFFF);
 
+        #[cfg(not(target_arch = "wasm32"))]
         let flags = (pdfium_sys::FPDF_ANNOT | pdfium_sys::FPDF_PRINTING) as i32;
+        #[cfg(target_arch = "wasm32")]
+        // The Wasm PDFium archive can trap in annotation/printing render paths.
+        let flags = 0;
 
         unsafe {
             ffi!(FPDF_RenderPageBitmap(

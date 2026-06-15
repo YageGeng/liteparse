@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 
-use super::{OcrEngine, OcrOptions, OcrResult};
+use super::{OcrEngine, OcrFuture, OcrOptions, OcrResult};
 use tesseract_rs::{TessPageIteratorLevel, TessPageSegMode, TesseractAPI};
 
 const TESSDATA_BASE_URL: &str = "https://github.com/tesseract-ocr/tessdata_best/raw/main";
@@ -48,13 +47,7 @@ impl OcrEngine for TesseractOcrEngine {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
-                + Send
-                + '_,
-        >,
-    > {
+    ) -> OcrFuture<'a> {
         Box::pin(async move {
             let language = Self::normalize_language(&options.language);
 

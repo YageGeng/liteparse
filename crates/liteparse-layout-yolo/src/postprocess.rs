@@ -1,16 +1,25 @@
+use crate::labels::LayoutLabel;
 use crate::preprocess::Letterbox;
 use crate::types::LayoutDetection;
 
+/// Candidate detection used internally before non-max suppression.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DetectionCandidate {
-    pub label: String,
+    /// Typed layout class predicted by the model.
+    pub label: LayoutLabel,
+    /// Confidence score for this candidate.
     pub confidence: f32,
+    /// Left position in PDF page coordinates.
     pub x: f32,
+    /// Top position in PDF page coordinates.
     pub y: f32,
+    /// Candidate width in PDF page coordinates.
     pub width: f32,
+    /// Candidate height in PDF page coordinates.
     pub height: f32,
 }
 
+/// Restore a model-space box through the letterbox transform into PDF page coordinates.
 pub fn restore_box_to_page(
     x: f32,
     y: f32,
@@ -40,6 +49,7 @@ pub fn restore_box_to_page(
     )
 }
 
+/// Apply confidence-ordered non-max suppression to layout candidates.
 pub fn non_max_suppression(
     mut candidates: Vec<DetectionCandidate>,
     iou_threshold: f32,
@@ -53,7 +63,7 @@ pub fn non_max_suppression(
     let mut kept: Vec<DetectionCandidate> = Vec::new();
     'candidate: for candidate in candidates {
         for existing in &kept {
-            if candidate.label == existing.label && iou(&candidate, existing) > iou_threshold {
+            if iou(&candidate, existing) > iou_threshold {
                 continue 'candidate;
             }
         }
@@ -72,6 +82,7 @@ pub fn non_max_suppression(
         .collect()
 }
 
+/// Compute intersection-over-union for two page-space candidates.
 fn iou(a: &DetectionCandidate, b: &DetectionCandidate) -> f32 {
     let x_overlap = (a.x + a.width).min(b.x + b.width) - a.x.max(b.x);
     let y_overlap = (a.y + a.height).min(b.y + b.height) - a.y.max(b.y);
@@ -88,9 +99,9 @@ fn iou(a: &DetectionCandidate, b: &DetectionCandidate) -> f32 {
 mod tests {
     use super::*;
 
-    fn candidate(label: &str, confidence: f32, x: f32, y: f32) -> DetectionCandidate {
+    fn candidate(label: LayoutLabel, confidence: f32, x: f32, y: f32) -> DetectionCandidate {
         DetectionCandidate {
-            label: label.into(),
+            label,
             confidence,
             x,
             y,
@@ -116,17 +127,38 @@ mod tests {
     fn nms_keeps_highest_confidence_overlapping_detection() {
         let kept = non_max_suppression(
             vec![
-                candidate("text", 0.80, 10.0, 10.0),
-                candidate("text", 0.95, 12.0, 12.0),
-                candidate("table", 0.70, 12.0, 12.0),
-                candidate("text", 0.60, 300.0, 300.0),
+                candidate(LayoutLabel::Text, 0.80, 10.0, 10.0),
+                candidate(LayoutLabel::Text, 0.95, 12.0, 12.0),
+                candidate(LayoutLabel::Table, 0.70, 12.0, 12.0),
+                candidate(LayoutLabel::Text, 0.60, 300.0, 300.0),
             ],
             0.5,
         );
 
-        assert_eq!(kept.len(), 3);
+        assert_eq!(kept.len(), 2);
         assert_eq!(kept[0].confidence, 0.95);
-        assert!(kept.iter().any(|d| d.label == "table"));
         assert!(kept.iter().any(|d| d.x == 300.0));
+    }
+
+    #[test]
+    fn nms_suppresses_overlapping_detections_with_different_labels() {
+        let kept = non_max_suppression(
+            vec![
+                candidate(LayoutLabel::Text, 0.90, 10.0, 10.0),
+                candidate(LayoutLabel::Title, 0.85, 12.0, 12.0),
+                candidate(LayoutLabel::Text, 0.60, 100.0, 100.0),
+            ],
+            0.5,
+        );
+
+        assert_eq!(kept.len(), 2);
+        assert!(
+            kept.iter()
+                .any(|d| d.label == LayoutLabel::Text && d.confidence == 0.90)
+        );
+        assert!(
+            kept.iter()
+                .any(|d| d.label == LayoutLabel::Text && d.confidence == 0.60)
+        );
     }
 }
