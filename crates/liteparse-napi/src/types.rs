@@ -2,6 +2,7 @@ use napi_derive::napi;
 
 use liteparse::config::{LiteParseConfig, OutputFormat};
 use liteparse::parser::ParseResult;
+use liteparse::projection;
 use liteparse::types::{LayoutBlock, ParsedPage, TextItem};
 
 // ---------------------------------------------------------------------------
@@ -25,7 +26,7 @@ pub struct JsLiteParseConfig {
     pub target_pages: Option<String>,
     /// DPI for rendering pages (used for OCR and screenshots).
     pub dpi: Option<f64>,
-    /// Output format: "json" or "text".
+    /// Output format: "json", "markdown", or "text".
     pub output_format: Option<String>,
     /// Keep very small text that would normally be filtered out.
     pub preserve_very_small_text: Option<bool>,
@@ -71,6 +72,7 @@ impl JsLiteParseConfig {
         }
         if let Some(v) = self.output_format {
             cfg.output_format = match v.as_str() {
+                "markdown" | "md" => OutputFormat::Markdown,
                 "text" => OutputFormat::Text,
                 _ => OutputFormat::Json,
             };
@@ -113,6 +115,7 @@ impl JsLiteParseConfig {
             dpi: Some(cfg.dpi as f64),
             output_format: Some(match cfg.output_format {
                 OutputFormat::Json => "json".to_string(),
+                OutputFormat::Markdown => "markdown".to_string(),
                 OutputFormat::Text => "text".to_string(),
             }),
             preserve_very_small_text: Some(cfg.preserve_very_small_text),
@@ -193,10 +196,24 @@ pub struct JsLayoutBlock {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+    pub text: String,
 }
 
 impl JsLayoutBlock {
-    pub fn from_rust(block: &LayoutBlock) -> Self {
+    pub fn from_rust(block: &LayoutBlock, page: &ParsedPage) -> Self {
+        let text = projection::project_text_items_to_text(
+            page.page_number,
+            page.page_width,
+            page.page_height,
+            page.text_items
+                .iter()
+                .filter(|item| item.layout_block_id == Some(block.id))
+                .cloned()
+                .collect(),
+        )
+        .trim()
+        .to_string();
+
         Self {
             id: block.id as u32,
             label: block.label.clone(),
@@ -205,6 +222,7 @@ impl JsLayoutBlock {
             y: block.y as f64,
             width: block.width as f64,
             height: block.height as f64,
+            text,
         }
     }
 }
@@ -235,7 +253,7 @@ impl JsParsedPage {
             layout_blocks: page
                 .layout_blocks
                 .iter()
-                .map(JsLayoutBlock::from_rust)
+                .map(|block| JsLayoutBlock::from_rust(block, page))
                 .collect(),
         }
     }

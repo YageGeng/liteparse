@@ -15,6 +15,7 @@ class TextItem:
     y: float
     width: float
     height: float
+    text: str = ""
     font_name: Optional[str] = None
     font_size: Optional[float] = None
     confidence: Optional[float] = None

@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 
 import { program } from "commander";
-import { LiteParse, type LiteParseConfig } from "./lib.js";
+import {
+  LiteParse,
+  type LayoutBlock,
+  type LiteParseConfig,
+  type OutputFormat,
+  type ParseResult,
+  type ParsedPage,
+} from "./lib.js";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, relative, parse as parsePath } from "node:path";
 
@@ -15,7 +22,7 @@ program
   .description("Parse a document and extract text")
   .argument("<file>", "Path to the document file")
   .option("-o, --output <file>", "Output file path")
-  .option("--format <format>", 'Output format: json|text (default: "text")')
+  .option("--format <format>", 'Output format: json|markdown|text (default: "text")')
   .option("--ocr-server-url <url>", "HTTP OCR server URL")
   .option("--no-ocr", "Disable OCR")
   .option("--ocr-language <lang>", "OCR language (default: eng)")
@@ -43,7 +50,7 @@ program
       }
 
       // CLI options override config file
-      if (opts.format) config.outputFormat = opts.format as "json" | "text";
+      if (opts.format) config.outputFormat = parseOutputFormat(opts.format as string);
       if (opts.ocrServerUrl)
         config.ocrServerUrl = opts.ocrServerUrl as string;
       if (opts.ocr === false) config.ocrEnabled = false;
@@ -62,22 +69,7 @@ program
       const parser = new LiteParse(config);
       const result = await parser.parse(file);
 
-      const output =
-        config.outputFormat === "json"
-          ? JSON.stringify(
-              {
-                pages: result.pages.map((p) => ({
-                  page: p.pageNum,
-                  width: p.width,
-                  height: p.height,
-                  text: p.text,
-                  textItems: p.textItems,
-                })),
-              },
-              null,
-              2,
-            )
-          : result.text;
+      const output = formatResult(result, config.outputFormat);
 
       if (opts.output) {
         writeFileSync(opts.output as string, output, "utf-8");
@@ -160,7 +152,7 @@ program
   .description("Parse multiple documents in batch mode")
   .argument("<input-dir>", "Input directory")
   .argument("<output-dir>", "Output directory")
-  .option("--format <format>", 'Output format: json|text (default: "text")')
+  .option("--format <format>", 'Output format: json|markdown|text (default: "text")')
   .option("--no-ocr", "Disable OCR")
   .option("--ocr-language <lang>", "OCR language (default: eng)")
   .option("--ocr-server-url <url>", "HTTP OCR server URL")
@@ -179,8 +171,8 @@ program
     ) => {
       try {
         const config: Partial<LiteParseConfig> = {};
-        const format = (opts.format as string) ?? "text";
-        config.outputFormat = format as "json" | "text";
+        const format = parseOutputFormat((opts.format as string) ?? "text");
+        config.outputFormat = format;
         if (opts.ocr === false) config.ocrEnabled = false;
         if (opts.ocrLanguage) config.ocrLanguage = opts.ocrLanguage as string;
         if (opts.ocrServerUrl)
@@ -192,7 +184,8 @@ program
         if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
 
         const parser = new LiteParse(config);
-        const outExt = format === "json" ? ".json" : ".txt";
+        const outExt =
+          format === "json" ? ".json" : format === "markdown" ? ".md" : ".txt";
 
         mkdirSync(outputDir, { recursive: true });
 
@@ -236,22 +229,7 @@ program
 
           try {
             const result = await parser.parse(filePath);
-            const output =
-              format === "json"
-                ? JSON.stringify(
-                    {
-                      pages: result.pages.map((p) => ({
-                        page: p.pageNum,
-                        width: p.width,
-                        height: p.height,
-                        text: p.text,
-                        textItems: p.textItems,
-                      })),
-                    },
-                    null,
-                    2,
-                  )
-                : result.text;
+            const output = formatResult(result, format);
             writeFileSync(outPath, output, "utf-8");
             success++;
             if (!opts.quiet) {
@@ -289,6 +267,88 @@ const SUPPORTED_EXTENSIONS = new Set([
   ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".svg",
   ".txt", ".md", ".markdown", ".log",
 ]);
+
+function parseOutputFormat(format: string): OutputFormat {
+  const normalized = format.toLowerCase();
+  if (normalized === "json" || normalized === "text") return normalized;
+  if (normalized === "markdown" || normalized === "md") return "markdown";
+  throw new Error(
+    `unknown format '${format}', expected 'json', 'markdown', or 'text'`,
+  );
+}
+
+function formatResult(result: ParseResult, format: OutputFormat): string {
+  if (format === "json") {
+    return JSON.stringify(
+      {
+        pages: result.pages.map((p) => ({
+          page: p.pageNum,
+          width: p.width,
+          height: p.height,
+          text: p.text,
+          textItems: p.textItems,
+          layoutBlocks: p.layoutBlocks,
+        })),
+      },
+      null,
+      2,
+    );
+  }
+
+  if (format === "markdown") {
+    return formatMarkdown(result.pages);
+  }
+
+  return result.text;
+}
+
+function formatMarkdown(pages: ParsedPage[]): string {
+  return pages
+    .map(formatPageMarkdown)
+    .filter((page) => page.length > 0)
+    .join("\n\n");
+}
+
+function formatPageMarkdown(page: ParsedPage): string {
+  if (page.layoutBlocks.length === 0) return page.text.trim();
+  return page.layoutBlocks
+    .map(formatBlockMarkdown)
+    .filter((block) => block.length > 0)
+    .join("\n\n");
+}
+
+function formatBlockMarkdown(block: LayoutBlock): string {
+  const text = block.text.trim();
+  if (block.label === "Picture" && !text) return "![Picture](#)";
+  if (!text) return "";
+
+  switch (block.label) {
+    case "Title":
+      return `# ${oneLine(text)}`;
+    case "SectionHeader":
+      return `## ${oneLine(text)}`;
+    case "ListItem":
+      return text
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => `- ${line}`)
+        .join("\n");
+    case "Formula":
+      return `$$\n${text}\n$$`;
+    case "Caption":
+    case "Footnote":
+      return `_${text}_`;
+    case "Picture":
+      return `![Picture](#)\n\n${text}`;
+    default:
+      return text;
+  }
+}
+
+function oneLine(text: string): string {
+  return text.split(/\s+/).filter(Boolean).join(" ");
+}
 
 function collectFiles(
   dir: string,

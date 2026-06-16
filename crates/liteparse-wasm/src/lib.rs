@@ -14,6 +14,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use liteparse::config::{LiteParseConfig, OutputFormat};
 use liteparse::ocr::{OcrEngine, OcrFuture, OcrOptions, OcrResult};
+use liteparse::output::markdown;
 use liteparse::parser::LiteParse as CoreLiteParse;
 use liteparse::projection;
 use liteparse::search;
@@ -86,10 +87,11 @@ impl JsLiteParseConfig {
         if let Some(v) = self.output_format {
             cfg.output_format = match v.as_str() {
                 "json" => OutputFormat::Json,
+                "markdown" | "md" => OutputFormat::Markdown,
                 "text" => OutputFormat::Text,
                 other => {
                     return Err(JsError::new(&format!(
-                        "invalid outputFormat: {} (expected 'json' or 'text')",
+                        "invalid outputFormat: {} (expected 'json', 'markdown', or 'text')",
                         other
                     )));
                 }
@@ -131,6 +133,7 @@ impl JsLiteParseConfig {
             dpi: Some(cfg.dpi),
             output_format: Some(match cfg.output_format {
                 OutputFormat::Json => "json".into(),
+                OutputFormat::Markdown => "markdown".into(),
                 OutputFormat::Text => "text".into(),
             }),
             preserve_very_small_text: Some(cfg.preserve_very_small_text),
@@ -404,6 +407,11 @@ impl LiteParse {
         liteparse::output::json::format_json(&result.pages)
     }
 
+    /// Format a parse result with the same Markdown formatter used by the CLI.
+    fn format_cli_markdown(result: &liteparse::ParseResult) -> String {
+        markdown::format_markdown(&result.pages)
+    }
+
     /// Construct a new parser. `config` is a JS object (all fields optional).
     /// If `config.ocrEngine` is present, it is wired up as the OCR backend.
     #[wasm_bindgen(constructor)]
@@ -519,6 +527,18 @@ impl LiteParse {
 
         Self::format_cli_json(&result)
             .map_err(|e| JsError::new(&format!("serialize CLI JSON failed: {}", e)))
+    }
+
+    /// Parse PDF bytes and return the same Markdown string produced by the CLI Markdown output.
+    #[wasm_bindgen(js_name = parseMarkdown)]
+    pub async fn parse_markdown(&self, data: Vec<u8>) -> Result<String, JsError> {
+        Self::log_layout_state("parseMarkdown:start", &self.config);
+        let result = self
+            .inner
+            .parse_input(PdfInput::Bytes(data))
+            .await
+            .map_err(|e| JsError::new(&format!("parse failed: {}", e)))?;
+        Ok(Self::format_cli_markdown(&result))
     }
 }
 

@@ -59,6 +59,7 @@ export interface NativeLayoutBlock {
   y: number;
   width: number;
   height: number;
+  text: string;
 }
 
 export interface NativeParsedPage {

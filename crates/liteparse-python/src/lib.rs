@@ -95,6 +95,8 @@ struct PyLayoutBlock {
     width: f64,
     #[pyo3(get)]
     height: f64,
+    #[pyo3(get)]
+    text: String,
 }
 
 #[pymethods]
@@ -108,15 +110,32 @@ impl PyLayoutBlock {
 }
 
 impl PyLayoutBlock {
-    fn from_rust(block: liteparse::types::LayoutBlock) -> Self {
+    fn from_rust(
+        block: &liteparse::types::LayoutBlock,
+        page: &liteparse::types::ParsedPage,
+    ) -> Self {
+        let text = liteparse::projection::project_text_items_to_text(
+            page.page_number,
+            page.page_width,
+            page.page_height,
+            page.text_items
+                .iter()
+                .filter(|item| item.layout_block_id == Some(block.id))
+                .cloned()
+                .collect(),
+        )
+        .trim()
+        .to_string();
+
         Self {
             id: block.id,
-            label: block.label,
+            label: block.label.clone(),
             confidence: block.confidence as f64,
             x: block.x as f64,
             y: block.y as f64,
             width: block.width as f64,
             height: block.height as f64,
+            text,
         }
     }
 }
@@ -153,6 +172,12 @@ impl PyParsedPage {
 
 impl PyParsedPage {
     fn from_rust(page: liteparse::types::ParsedPage) -> Self {
+        let layout_blocks = page
+            .layout_blocks
+            .iter()
+            .map(|block| PyLayoutBlock::from_rust(block, &page))
+            .collect();
+
         Self {
             page_num: page.page_number as u32,
             width: page.page_width as f64,
@@ -163,11 +188,7 @@ impl PyParsedPage {
                 .into_iter()
                 .map(PyTextItem::from_rust)
                 .collect(),
-            layout_blocks: page
-                .layout_blocks
-                .into_iter()
-                .map(PyLayoutBlock::from_rust)
-                .collect(),
+            layout_blocks,
         }
     }
 }
@@ -304,6 +325,7 @@ impl PyLiteParseConfig {
             dpi: cfg.dpi,
             output_format: match cfg.output_format {
                 OutputFormat::Json => "json".to_string(),
+                OutputFormat::Markdown => "markdown".to_string(),
                 OutputFormat::Text => "text".to_string(),
             },
             preserve_very_small_text: cfg.preserve_very_small_text,
@@ -397,6 +419,7 @@ impl LiteParse {
         }
         if let Some(v) = output_format {
             cfg.output_format = match v.as_str() {
+                "markdown" | "md" => OutputFormat::Markdown,
                 "text" => OutputFormat::Text,
                 _ => OutputFormat::Json,
             };

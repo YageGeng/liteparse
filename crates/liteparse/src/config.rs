@@ -42,6 +42,7 @@ pub struct LiteParseConfig {
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     Json,
+    Markdown,
     Text,
 }
 
@@ -155,6 +156,8 @@ mod tests {
     fn test_output_format_lowercase_serde() {
         let s = serde_json::to_string(&OutputFormat::Json).unwrap();
         assert_eq!(s, "\"json\"");
+        let markdown = serde_json::to_string(&OutputFormat::Markdown).unwrap();
+        assert_eq!(markdown, "\"markdown\"");
         let back: OutputFormat = serde_json::from_str("\"text\"").unwrap();
         assert_eq!(back, OutputFormat::Text);
     }

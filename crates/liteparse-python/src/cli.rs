@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 use liteparse::config::{LiteParseConfig, OutputFormat};
 use liteparse::conversion;
-use liteparse::output::{json, text};
+use liteparse::output::{json, markdown, text};
 use liteparse::parser::LiteParse;
 
 #[derive(Parser, Debug)]
@@ -104,8 +104,12 @@ struct BatchParseCommand {
 fn parse_output_format(s: &str) -> Result<OutputFormat, String> {
     match s.to_lowercase().as_str() {
         "json" => Ok(OutputFormat::Json),
+        "markdown" | "md" => Ok(OutputFormat::Markdown),
         "text" => Ok(OutputFormat::Text),
-        _ => Err(format!("unknown format '{}', expected 'json' or 'text'", s)),
+        _ => Err(format!(
+            "unknown format '{}', expected 'json', 'markdown', or 'text'",
+            s
+        )),
     }
 }
 
@@ -138,6 +142,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             let result = rt.block_on(lp.parse(&cmd.file))?;
             let formatted = match lp.config().output_format {
                 OutputFormat::Json => json::format_json(&result.pages)?,
+                OutputFormat::Markdown => markdown::format_markdown(&result.pages),
                 OutputFormat::Text => text::format_text(&result.pages),
             };
             match cmd.output {
@@ -213,10 +218,10 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             }
 
             let lp = LiteParse::new(config);
-            let out_ext = if format == OutputFormat::Json {
-                "json"
-            } else {
-                "txt"
+            let out_ext = match format {
+                OutputFormat::Json => "json",
+                OutputFormat::Markdown => "md",
+                OutputFormat::Text => "txt",
             };
 
             std::fs::create_dir_all(&cmd.output_dir)?;
@@ -246,13 +251,16 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
                 match rt.block_on(lp.parse(file_path)) {
                     Ok(result) => {
-                        let fmt_result: Result<String, Box<dyn std::error::Error>> =
-                            match lp.config().output_format {
-                                OutputFormat::Json => {
-                                    json::format_json(&result.pages).map_err(|e| e.into())
-                                }
-                                OutputFormat::Text => Ok(text::format_text(&result.pages)),
-                            };
+                        let fmt_result: Result<String, Box<dyn std::error::Error>> = match lp
+                            .config()
+                            .output_format
+                        {
+                            OutputFormat::Json => {
+                                json::format_json(&result.pages).map_err(|e| e.into())
+                            }
+                            OutputFormat::Markdown => Ok(markdown::format_markdown(&result.pages)),
+                            OutputFormat::Text => Ok(text::format_text(&result.pages)),
+                        };
                         match fmt_result {
                             Ok(formatted) => {
                                 std::fs::write(&out_path, &formatted)?;

@@ -236,6 +236,66 @@
         word-break: normal;
       }
 
+      #output.markdown {
+        background: white;
+        color: var(--black);
+        font-family: var(--font-sans);
+        font-size: 0.95rem;
+        line-height: 1.65;
+        white-space: normal;
+      }
+
+      #output.markdown h1,
+      #output.markdown h2 {
+        line-height: 1.25;
+        margin: 0 0 0.75rem;
+      }
+
+      #output.markdown h1 {
+        font-size: 1.45rem;
+      }
+
+      #output.markdown h2 {
+        font-size: 1.15rem;
+        margin-top: 1.5rem;
+      }
+
+      #output.markdown p,
+      #output.markdown ul,
+      #output.markdown pre {
+        margin: 0 0 1rem;
+      }
+
+      #output.markdown ul {
+        padding-left: 1.25rem;
+      }
+
+      #output.markdown pre {
+        background: var(--off-white);
+        border: 1px solid var(--light-grey);
+        border-radius: 6px;
+        color: var(--black);
+        font-family: var(--font-mono);
+        overflow: auto;
+        padding: 0.75rem;
+        white-space: pre-wrap;
+      }
+
+      #output.markdown em {
+        color: var(--dark-grey);
+      }
+
+      #output.markdown .md-image {
+        border: 1px dashed var(--light-grey);
+        border-radius: 6px;
+        color: var(--dark-grey);
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+        margin: 0 0 1rem;
+        padding: 1rem;
+        text-align: center;
+      }
+
       /* Stats bar */
       .stats {
         display: flex;
@@ -444,6 +504,7 @@
           <label for="format-select">Output:</label>
           <select id="format-select">
             <option value="text">Plain Text</option>
+            <option value="markdown">Markdown</option>
             <option value="json">JSON (with bounding boxes)</option>
           </select>
           <div class="spacer"></div>
@@ -472,9 +533,10 @@
   <span class="const">layoutImageSize</span>: <span class="const">1280</span>
 });
 
-<span class="cmt">// Parse PDF bytes into CLI-compatible JSON</span>
+<span class="cmt">// Parse PDF bytes into CLI-compatible JSON or Markdown</span>
 <span class="kw">const</span> <span class="const">bytes</span> = <span class="kw">new</span> <span class="fn">Uint8Array</span>(<span class="kw">await</span> file.<span class="fn">arrayBuffer</span>());
 <span class="kw">const</span> <span class="const">json</span> = <span class="kw">await</span> parser.<span class="fn">parseJson</span>(<span class="const">bytes</span>);
+<span class="kw">const</span> <span class="const">markdown</span> = <span class="kw">await</span> parser.<span class="fn">parseMarkdown</span>(<span class="const">bytes</span>);
 
 console.<span class="fn">log</span>(<span class="const">json</span>); <span class="cmt">// same schema as the CLI JSON output</span></pre>
       </div>
@@ -499,6 +561,7 @@ console.<span class="fn">log</span>(<span class="const">json</span>); <span clas
 
       let lastResult = null;
       let lastJsonOutput = "";
+      let lastMarkdownOutput = "";
       let lastTextOutput = "";
       let parser = null;
       let isParsing = false;
@@ -545,7 +608,7 @@ console.<span class="fn">log</span>(<span class="const">json</span>); <span clas
           allowRemoteWasm
             ? "Failed to load local/remote WASM module."
             : "Failed to load local WASM module. Add ?remote=1 to allow CDN fallback.",
-          "error",
+          "error"
         );
       }
 
@@ -614,12 +677,14 @@ console.<span class="fn">log</span>(<span class="const">json</span>); <span clas
           const bytes = new Uint8Array(await file.arrayBuffer());
           // Keep the JSON panel aligned with the Rust CLI formatter instead of JS object serialization.
           const jsonOutput = await getParser().parseJson(bytes);
+          const markdownOutput = await getParser().parseMarkdown(bytes);
           const result = JSON.parse(jsonOutput);
           const documentText = result.pages.map((page) => page.text || "").join("\n\n");
           const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
 
           lastResult = result;
           lastJsonOutput = jsonOutput;
+          lastMarkdownOutput = markdownOutput;
           lastTextOutput = documentText;
           setStatus(`Parsed ${result.pages.length} page(s) in ${elapsed}s`, "success");
           renderOutput();
@@ -644,17 +709,105 @@ console.<span class="fn">log</span>(<span class="const">json</span>); <span clas
       // --- Render output ---
       function renderOutput() {
         if (!lastResult) return;
+        output.classList.toggle("markdown", formatSelect.value === "markdown");
         if (formatSelect.value === "text") {
+          output.innerHTML = "";
           output.textContent = lastTextOutput;
+        } else if (formatSelect.value === "markdown") {
+          output.innerHTML = renderMarkdown(lastMarkdownOutput);
         } else {
+          output.innerHTML = "";
           output.textContent = lastJsonOutput;
         }
+      }
+
+      function renderMarkdown(markdown) {
+        const blocks = markdown.split(/\n{2,}/);
+        const html = [];
+        let inList = false;
+
+        const closeList = () => {
+          if (inList) {
+            html.push("</ul>");
+            inList = false;
+          }
+        };
+
+        for (const block of blocks) {
+          const trimmed = block.trim();
+          if (!trimmed) continue;
+
+          if (trimmed.startsWith("# ")) {
+            closeList();
+            html.push(`<h1>${escapeHtml(trimmed.slice(2).trim())}</h1>`);
+            continue;
+          }
+
+          if (trimmed.startsWith("## ")) {
+            closeList();
+            html.push(`<h2>${escapeHtml(trimmed.slice(3).trim())}</h2>`);
+            continue;
+          }
+
+          if (trimmed.startsWith("$$")) {
+            closeList();
+            const formula = trimmed.replace(/^\$\$\s*/, "").replace(/\s*\$\$$/, "");
+            html.push(`<pre><code>${escapeHtml(formula.trim())}</code></pre>`);
+            continue;
+          }
+
+          const imageMatch = trimmed.match(/^!\[([^\]]*)\]\(([^)]*)\)$/);
+          if (imageMatch) {
+            closeList();
+            const label = imageMatch[1].trim() || "Picture";
+            html.push(`<figure class="md-image">${escapeHtml(label)}</figure>`);
+            continue;
+          }
+
+          const lines = trimmed.split(/\r?\n/);
+          if (lines.every((line) => line.trim().startsWith("- "))) {
+            if (!inList) {
+              html.push("<ul>");
+              inList = true;
+            }
+            for (const line of lines) {
+              html.push(`<li>${escapeInlineMarkdown(line.trim().slice(2))}</li>`);
+            }
+            continue;
+          }
+
+          closeList();
+          html.push(`<p>${escapeInlineMarkdown(trimmed).replace(/\n/g, "<br>")}</p>`);
+        }
+
+        closeList();
+        return html.join("");
+      }
+
+      function escapeInlineMarkdown(value) {
+        const escaped = escapeHtml(value);
+        return escaped.replace(/^_(.*)_$/s, "<em>$1</em>");
+      }
+
+      function escapeHtml(value) {
+        return value
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
       }
 
       formatSelect.addEventListener("change", renderOutput);
 
       copyBtn.addEventListener("click", () => {
-        navigator.clipboard.writeText(output.textContent);
+        const rawOutput =
+          formatSelect.value === "markdown"
+            ? lastMarkdownOutput
+            : formatSelect.value === "text"
+              ? lastTextOutput
+              : lastJsonOutput;
+        navigator.clipboard.writeText(rawOutput);
         copyBtn.textContent = "Copied!";
         setTimeout(() => {
           copyBtn.textContent = "Copy";

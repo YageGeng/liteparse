@@ -18,7 +18,7 @@ export interface JsLiteParseConfig {
   targetPages?: string
   /** DPI for rendering pages (used for OCR and screenshots). */
   dpi?: number
-  /** Output format: "json" or "text". */
+  /** Output format: "json", "markdown", or "text". */
   outputFormat?: string
   /** Keep very small text that would normally be filtered out. */
   preserveVerySmallText?: boolean

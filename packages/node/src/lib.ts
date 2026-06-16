@@ -13,7 +13,7 @@ import {
 // ---------------------------------------------------------------------------
 
 export type LiteParseInput = string | Buffer | Uint8Array;
-export type OutputFormat = "json" | "text";
+export type OutputFormat = "json" | "markdown" | "text";
 
 export interface LiteParseConfig {
   ocrLanguage: string;
@@ -55,6 +55,7 @@ export interface LayoutBlock {
   y: number;
   width: number;
   height: number;
+  text: string;
 }
 
 export interface ParsedPage {
@@ -199,6 +200,7 @@ function toLayoutBlock(block: NativeLayoutBlock): LayoutBlock {
     y: block.y,
     width: block.width,
     height: block.height,
+    text: block.text,
   };
 }
 
