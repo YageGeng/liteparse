@@ -14,6 +14,15 @@ pub struct RenderedPage {
     pub png_bytes: Vec<u8>,
 }
 
+/// A single rendered page as raw RGBA pixels.
+#[derive(Debug, Clone)]
+pub struct RenderedRgbaPage {
+    pub page_num: u32,
+    pub width: u32,
+    pub height: u32,
+    pub rgba_bytes: Vec<u8>,
+}
+
 /// Render selected pages from a PDF input to PNG bytes.
 ///
 /// Acquires the process-global PDFium lock for the entire render. The lock
@@ -26,16 +35,37 @@ pub fn render_pages_to_png(
     dpi: f32,
     password: Option<&str>,
 ) -> Result<Vec<RenderedPage>, LiteParseError> {
-    let lib = Library::init();
-    let document = load_document_from_input(&lib, input, password)?;
-    render_document_pages(&document, page_numbers, dpi)
+    render_pages_to_rgba(input, page_numbers, dpi, password)?
+        .into_iter()
+        .map(|page| {
+            let png_bytes = encode_png(&page.rgba_bytes, page.width, page.height)?;
+            Ok(RenderedPage {
+                page_num: page.page_num,
+                width: page.width,
+                height: page.height,
+                png_bytes,
+            })
+        })
+        .collect::<Result<Vec<_>, LiteParseError>>()
 }
 
-fn render_document_pages(
+/// Render selected pages from a PDF input to raw RGBA pixels.
+pub fn render_pages_to_rgba(
+    input: &PdfInput,
+    page_numbers: Option<&[u32]>,
+    dpi: f32,
+    password: Option<&str>,
+) -> Result<Vec<RenderedRgbaPage>, LiteParseError> {
+    let lib = Library::init();
+    let document = load_document_from_input(&lib, input, password)?;
+    render_document_pages_to_rgba(&document, page_numbers, dpi)
+}
+
+fn render_document_pages_to_rgba(
     document: &pdfium::Document,
     page_numbers: Option<&[u32]>,
     dpi: f32,
-) -> Result<Vec<RenderedPage>, LiteParseError> {
+) -> Result<Vec<RenderedRgbaPage>, LiteParseError> {
     let page_count = document.page_count() as u32;
     let pages: Vec<u32> = match page_numbers {
         Some(nums) => nums.to_vec(),
@@ -54,14 +84,13 @@ fn render_document_pages(
         let bitmap = page.render(dpi)?;
         let width = bitmap.width() as u32;
         let height = bitmap.height() as u32;
-        let rgba = bitmap.to_rgba();
-        let png_bytes = encode_png(&rgba, width, height)?;
+        let rgba_bytes = bitmap.to_rgba();
 
-        results.push(RenderedPage {
+        results.push(RenderedRgbaPage {
             page_num,
             width,
             height,
-            png_bytes,
+            rgba_bytes,
         });
     }
 

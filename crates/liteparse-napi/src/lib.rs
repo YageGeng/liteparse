@@ -79,6 +79,37 @@ impl LiteParse {
             .collect())
     }
 
+    /// Take screenshots annotated with detected layout boxes.
+    #[napi(js_name = "layoutScreenshot")]
+    pub async fn layout_screenshot(
+        &self,
+        input: Either<String, Buffer>,
+        page_numbers: Option<Vec<u32>>,
+    ) -> Result<Vec<JsScreenshotResult>> {
+        use liteparse::types::PdfInput;
+
+        let pdf_input = match input {
+            Either::A(path) => PdfInput::Path(path),
+            Either::B(buf) => PdfInput::Bytes(buf.to_vec()),
+        };
+
+        let results = self
+            .inner
+            .layout_screenshot_input(pdf_input, page_numbers)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+
+        Ok(results
+            .into_iter()
+            .map(|r| JsScreenshotResult {
+                page_num: r.page_num,
+                width: r.width,
+                height: r.height,
+                image_buffer: r.image_bytes.into(),
+            })
+            .collect())
+    }
+
     /// Get the current configuration.
     #[napi(getter)]
     pub fn config(&self) -> JsLiteParseConfig {

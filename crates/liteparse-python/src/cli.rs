@@ -21,6 +21,8 @@ enum Commands {
     Parse(ParseCommand),
     /// Generate screenshots of document pages (PDF, DOCX, XLSX, images, etc.)
     Screenshot(ScreenshotCommand),
+    /// Generate page screenshots annotated with detected layout boxes
+    LayoutScreenshot(LayoutScreenshotCommand),
     /// Parse multiple documents in batch mode
     BatchParse(BatchParseCommand),
 }
@@ -65,6 +67,27 @@ struct ScreenshotCommand {
     target_pages: Option<String>,
     #[arg(long, default_value = "150")]
     dpi: f32,
+    #[arg(long)]
+    password: Option<String>,
+    #[arg(short, long)]
+    quiet: bool,
+}
+
+#[derive(Args, Debug)]
+struct LayoutScreenshotCommand {
+    file: String,
+    #[arg(short, long, default_value = "./layout-screenshots")]
+    output_dir: String,
+    #[arg(long)]
+    target_pages: Option<String>,
+    #[arg(long, default_value = "150")]
+    dpi: f32,
+    #[arg(long, default_value = "0.25")]
+    layout_confidence_threshold: f32,
+    #[arg(long, default_value = "0.45")]
+    layout_iou_threshold: f32,
+    #[arg(long, default_value = "1280")]
+    layout_image_size: u32,
     #[arg(long)]
     password: Option<String>,
     #[arg(short, long)]
@@ -182,6 +205,42 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 if !cmd.quiet {
                     eprintln!(
                         "[liteparse] screenshot page {} → {}",
+                        result.page_num, output_path
+                    );
+                }
+            }
+        }
+
+        Commands::LayoutScreenshot(cmd) => {
+            let target_pages = cmd
+                .target_pages
+                .as_ref()
+                .map(|s| liteparse::config::parse_target_pages(s))
+                .transpose()
+                .map_err(|e| format!("invalid --target-pages: {}", e))?;
+
+            std::fs::create_dir_all(&cmd.output_dir)?;
+
+            let config = LiteParseConfig {
+                target_pages: cmd.target_pages.clone(),
+                dpi: cmd.dpi,
+                password: cmd.password.clone(),
+                quiet: cmd.quiet,
+                layout_enabled: true,
+                layout_confidence_threshold: cmd.layout_confidence_threshold,
+                layout_iou_threshold: cmd.layout_iou_threshold,
+                layout_image_size: cmd.layout_image_size,
+                ..Default::default()
+            };
+            let lp = LiteParse::new(config);
+            let results = rt.block_on(lp.layout_screenshot(&cmd.file, target_pages))?;
+
+            for result in results {
+                let output_path = format!("{}/page_{}.png", cmd.output_dir, result.page_num);
+                std::fs::write(&output_path, &result.image_bytes)?;
+                if !cmd.quiet {
+                    eprintln!(
+                        "[liteparse] layout screenshot page {} → {}",
                         result.page_num, output_path
                     );
                 }

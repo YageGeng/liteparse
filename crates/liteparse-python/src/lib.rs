@@ -507,6 +507,32 @@ impl LiteParse {
         })
     }
 
+    /// Take screenshots annotated with detected layout boxes.
+    #[pyo3(signature = (input, page_numbers = None))]
+    fn layout_screenshot(
+        &self,
+        py: Python<'_>,
+        input: String,
+        page_numbers: Option<Vec<u32>>,
+    ) -> PyResult<Vec<PyScreenshotResult>> {
+        py.detach(|| {
+            let results = self
+                .runtime
+                .block_on(self.inner.layout_screenshot(&input, page_numbers))
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+            Ok(results
+                .into_iter()
+                .map(|r| PyScreenshotResult {
+                    page_num: r.page_num,
+                    width: r.width,
+                    height: r.height,
+                    image_buffer: r.image_bytes,
+                })
+                .collect())
+        })
+    }
+
     /// Get the resolved configuration.
     #[getter]
     fn config(&self) -> PyLiteParseConfig {

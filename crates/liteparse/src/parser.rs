@@ -3,6 +3,7 @@ use crate::config::{LiteParseConfig, parse_target_pages};
 use crate::conversion;
 use crate::error::LiteParseError;
 use crate::extract;
+use crate::layout_annotate;
 use crate::layout_merge;
 #[cfg(any(
     feature = "layout-yolo",
@@ -18,7 +19,6 @@ use crate::ocr::http_simple::HttpOcrEngine;
 use crate::ocr::tesseract::TesseractOcrEngine;
 use crate::ocr_merge;
 use crate::projection;
-#[cfg(not(target_arch = "wasm32"))]
 use crate::render;
 use crate::types::{ParsedPage, PdfInput};
 use pdfium::Library;
@@ -594,6 +594,100 @@ impl LiteParse {
                 image_bytes: page.png_bytes,
             })
             .collect())
+    }
+
+    /// Generate page screenshots with detected layout blocks drawn on top.
+    ///
+    /// This method enables layout detection for the parse pass regardless of
+    /// the parser's current `layout_enabled` setting. It returns plain page
+    /// screenshots if the detector produces no blocks.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn layout_screenshot(
+        &self,
+        input: &str,
+        page_numbers: Option<Vec<u32>>,
+    ) -> Result<Vec<ScreenshotResult>, LiteParseError> {
+        self.layout_screenshot_input(PdfInput::Path(input.to_string()), page_numbers)
+            .await
+    }
+
+    /// Generate annotated layout screenshots from a file path or raw PDF bytes.
+    pub async fn layout_screenshot_input(
+        &self,
+        input: PdfInput,
+        page_numbers: Option<Vec<u32>>,
+    ) -> Result<Vec<ScreenshotResult>, LiteParseError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let (validated_input, _guard) =
+            conversion::resolve_pdf_input(input, self.config.password.as_deref(), true).await?;
+
+        #[cfg(target_arch = "wasm32")]
+        let validated_input = input;
+
+        let effective_page_numbers = match page_numbers {
+            Some(nums) => Some(nums),
+            None => self
+                .config
+                .target_pages
+                .as_ref()
+                .map(|s| parse_target_pages(s))
+                .transpose()
+                .map_err(|e| format!("invalid target_pages: {}", e))?,
+        };
+
+        let mut parse_config = self.config.clone();
+        parse_config.layout_enabled = true;
+        if let Some(nums) = &effective_page_numbers {
+            parse_config.target_pages = Some(
+                nums.iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            parse_config.max_pages = parse_config.max_pages.max(nums.len());
+        }
+
+        let parser = LiteParse {
+            config: parse_config,
+            ocr_engine_override: self.ocr_engine_override.clone(),
+        };
+        let parsed = parser.parse_input(validated_input.clone()).await?;
+        let mut rendered = render::render_pages_to_rgba(
+            &validated_input,
+            effective_page_numbers.as_deref(),
+            self.config.dpi,
+            self.config.password.as_deref(),
+        )?;
+
+        rendered
+            .iter_mut()
+            .map(|page| {
+                let parsed_page = parsed
+                    .pages
+                    .iter()
+                    .find(|parsed_page| parsed_page.page_number as u32 == page.page_num);
+                let blocks = parsed_page
+                    .map(|parsed_page| parsed_page.layout_blocks.as_slice())
+                    .unwrap_or(&[]);
+                let (page_width, page_height) = parsed_page
+                    .map(|parsed_page| (parsed_page.page_width, parsed_page.page_height))
+                    .unwrap_or((page.width as f32, page.height as f32));
+                let image_bytes = layout_annotate::annotate_layout_png(
+                    &mut page.rgba_bytes,
+                    page.width,
+                    page.height,
+                    page_width,
+                    page_height,
+                    blocks,
+                )?;
+                Ok(ScreenshotResult {
+                    page_num: page.page_num,
+                    width: page.width,
+                    height: page.height,
+                    image_bytes,
+                })
+            })
+            .collect()
     }
 
     pub fn config(&self) -> &LiteParseConfig {

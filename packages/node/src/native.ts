@@ -89,6 +89,10 @@ export interface LiteParseNative {
     input: string | Buffer,
     pageNumbers?: number[] | null,
   ): Promise<NativeScreenshotResult[]>;
+  layoutScreenshot(
+    input: string | Buffer,
+    pageNumbers?: number[] | null,
+  ): Promise<NativeScreenshotResult[]>;
   format(result: NativeParseResult): string;
   readonly config: LiteParseNativeConfig;
 }

@@ -296,6 +296,47 @@
         text-align: center;
       }
 
+      .layout-preview {
+        display: none;
+        margin-bottom: 1rem;
+      }
+
+      .layout-preview.visible {
+        display: block;
+      }
+
+      .layout-preview h3 {
+        font-size: 0.9rem;
+        font-weight: 600;
+        margin-bottom: 0.75rem;
+      }
+
+      .layout-pages {
+        display: grid;
+        gap: 1rem;
+      }
+
+      .layout-page {
+        background: white;
+        border: 1px solid var(--light-grey);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+
+      .layout-page-header {
+        border-bottom: 1px solid var(--light-grey);
+        color: var(--dark-grey);
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        padding: 0.5rem 0.75rem;
+      }
+
+      .layout-page img {
+        display: block;
+        height: auto;
+        width: 100%;
+      }
+
       /* Stats bar */
       .stats {
         display: flex;
@@ -500,6 +541,10 @@
       <div id="status"></div>
 
       <div class="output-container" id="output-container">
+        <div class="layout-preview" id="layout-preview">
+          <h3>Layout Preview</h3>
+          <div class="layout-pages" id="layout-pages"></div>
+        </div>
         <div class="controls">
           <label for="format-select">Output:</label>
           <select id="format-select">
@@ -537,6 +582,7 @@
 <span class="kw">const</span> <span class="const">bytes</span> = <span class="kw">new</span> <span class="fn">Uint8Array</span>(<span class="kw">await</span> file.<span class="fn">arrayBuffer</span>());
 <span class="kw">const</span> <span class="const">json</span> = <span class="kw">await</span> parser.<span class="fn">parseJson</span>(<span class="const">bytes</span>);
 <span class="kw">const</span> <span class="const">markdown</span> = <span class="kw">await</span> parser.<span class="fn">parseMarkdown</span>(<span class="const">bytes</span>);
+<span class="kw">const</span> <span class="const">layoutImages</span> = <span class="kw">await</span> parser.<span class="fn">layoutScreenshots</span>(<span class="const">bytes</span>);
 
 console.<span class="fn">log</span>(<span class="const">json</span>); <span class="cmt">// same schema as the CLI JSON output</span></pre>
       </div>
@@ -554,6 +600,8 @@ console.<span class="fn">log</span>(<span class="const">json</span>); <span clas
       const output = document.getElementById("output");
       const outputContainer = document.getElementById("output-container");
       const statsEl = document.getElementById("stats");
+      const layoutPreview = document.getElementById("layout-preview");
+      const layoutPages = document.getElementById("layout-pages");
       const dropZone = document.getElementById("drop-zone");
       const fileInput = document.getElementById("pdf-input");
       const formatSelect = document.getElementById("format-select");
@@ -563,6 +611,7 @@ console.<span class="fn">log</span>(<span class="const">json</span>); <span clas
       let lastJsonOutput = "";
       let lastMarkdownOutput = "";
       let lastTextOutput = "";
+      let lastLayoutImageUrls = [];
       let parser = null;
       let isParsing = false;
 
@@ -671,6 +720,7 @@ console.<span class="fn">log</span>(<span class="const">json</span>); <span clas
         isParsing = true;
         setStatus(`Parsing "${file.name}"...`, "loading");
         outputContainer.classList.remove("visible");
+        clearLayoutPreview();
 
         try {
           const t0 = performance.now();
@@ -678,6 +728,7 @@ console.<span class="fn">log</span>(<span class="const">json</span>); <span clas
           // Keep the JSON panel aligned with the Rust CLI formatter instead of JS object serialization.
           const jsonOutput = await getParser().parseJson(bytes);
           const markdownOutput = await getParser().parseMarkdown(bytes);
+          const layoutScreenshots = await getParser().layoutScreenshots(bytes);
           const result = JSON.parse(jsonOutput);
           const documentText = result.pages.map((page) => page.text || "").join("\n\n");
           const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
@@ -686,6 +737,7 @@ console.<span class="fn">log</span>(<span class="const">json</span>); <span clas
           lastJsonOutput = jsonOutput;
           lastMarkdownOutput = markdownOutput;
           lastTextOutput = documentText;
+          renderLayoutPreview(layoutScreenshots);
           setStatus(`Parsed ${result.pages.length} page(s) in ${elapsed}s`, "success");
           renderOutput();
 
@@ -704,6 +756,37 @@ console.<span class="fn">log</span>(<span class="const">json</span>); <span clas
         } finally {
           isParsing = false;
         }
+      }
+
+      function clearLayoutPreview() {
+        for (const url of lastLayoutImageUrls) {
+          URL.revokeObjectURL(url);
+        }
+        lastLayoutImageUrls = [];
+        layoutPages.innerHTML = "";
+        layoutPreview.classList.remove("visible");
+      }
+
+      function renderLayoutPreview(screenshots) {
+        clearLayoutPreview();
+        if (!screenshots || screenshots.length === 0) return;
+
+        const html = [];
+        for (const screenshot of screenshots) {
+          const blob = new Blob([screenshot.imageBytes], { type: "image/png" });
+          const url = URL.createObjectURL(blob);
+          lastLayoutImageUrls.push(url);
+          html.push(`
+            <figure class="layout-page">
+              <figcaption class="layout-page-header">
+                Page ${screenshot.pageNum} · ${screenshot.width}×${screenshot.height}
+              </figcaption>
+              <img src="${url}" alt="Layout detection result for page ${screenshot.pageNum}" />
+            </figure>
+          `);
+        }
+        layoutPages.innerHTML = html.join("");
+        layoutPreview.classList.add("visible");
       }
 
       // --- Render output ---

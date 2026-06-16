@@ -160,6 +160,24 @@ export class LiteParse {
     }));
   }
 
+  async layoutScreenshot(
+    input: LiteParseInput,
+    pageNumbers?: number[],
+  ): Promise<ScreenshotResult[]> {
+    const nativeInput =
+      typeof input === "string" ? input : Buffer.from(input);
+    const results = await this._native.layoutScreenshot(
+      nativeInput,
+      pageNumbers ?? null,
+    );
+    return results.map((r) => ({
+      pageNum: r.pageNum,
+      width: r.width,
+      height: r.height,
+      imageBuffer: r.imageBuffer,
+    }));
+  }
+
   getConfig(): LiteParseConfig {
     return { ...this._config };
   }

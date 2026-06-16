@@ -14,6 +14,8 @@ pub use types::{ParsedPage, TextItem};
 // ── Modules with user-facing types (visible in docs) ───────────────────
 pub mod config;
 pub mod error;
+#[doc(hidden)]
+pub mod layout_annotate;
 pub mod layout_merge;
 #[doc(hidden)]
 pub mod layout_order;
@@ -43,6 +45,5 @@ pub mod ocr_merge;
 pub mod output;
 #[doc(hidden)]
 pub mod projection;
-#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod render;

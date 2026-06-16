@@ -148,6 +148,66 @@ program
   });
 
 program
+  .command("layout-screenshot")
+  .description("Generate screenshots annotated with detected layout boxes")
+  .argument("<file>", "Path to the document file")
+  .option(
+    "-o, --output-dir <dir>",
+    "Output directory for annotated screenshots",
+    "./layout-screenshots",
+  )
+  .option(
+    "--target-pages <pages>",
+    'Pages to screenshot (e.g., "1,3,5" or "1-5")',
+  )
+  .option("--dpi <dpi>", "Rendering DPI", parseFloat)
+  .option("--layout-confidence-threshold <n>", "Minimum layout confidence", parseFloat)
+  .option("--layout-iou-threshold <n>", "Layout NMS IoU threshold", parseFloat)
+  .option("--layout-image-size <n>", "Square image size for layout detection", parseInt)
+  .option("--password <password>", "Password for encrypted documents")
+  .option("-q, --quiet", "Suppress progress output")
+  .action(async (file: string, opts: Record<string, unknown>) => {
+    try {
+      const config: Partial<LiteParseConfig> = { layoutEnabled: true };
+      if (opts.dpi) config.dpi = opts.dpi as number;
+      if (opts.password) config.password = opts.password as string;
+      if (opts.quiet) config.quiet = true;
+      if (opts.targetPages) config.targetPages = opts.targetPages as string;
+      if (opts.layoutConfidenceThreshold)
+        config.layoutConfidenceThreshold = opts.layoutConfidenceThreshold as number;
+      if (opts.layoutIouThreshold)
+        config.layoutIouThreshold = opts.layoutIouThreshold as number;
+      if (opts.layoutImageSize)
+        config.layoutImageSize = opts.layoutImageSize as number;
+
+      const parser = new LiteParse(config);
+      const pageNumbers = opts.targetPages
+        ? parseTargetPages(opts.targetPages as string)
+        : undefined;
+
+      const outputDir = opts.outputDir as string;
+      mkdirSync(outputDir, { recursive: true });
+
+      const results = await parser.layoutScreenshot(file, pageNumbers);
+
+      for (const result of results) {
+        const outputPath = join(outputDir, `page_${result.pageNum}.png`);
+        writeFileSync(outputPath, result.imageBuffer);
+        if (!opts.quiet) {
+          console.error(
+            `[liteparse] layout screenshot page ${result.pageNum} → ${outputPath}`,
+          );
+        }
+      }
+    } catch (err) {
+      console.error(
+        `Error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+  });
+
+program
   .command("batch-parse")
   .description("Parse multiple documents in batch mode")
   .argument("<input-dir>", "Input directory")
@@ -275,6 +335,21 @@ function parseOutputFormat(format: string): OutputFormat {
   throw new Error(
     `unknown format '${format}', expected 'json', 'markdown', or 'text'`,
   );
+}
+
+function parseTargetPages(value: string): number[] {
+  const pageNumbers: number[] = [];
+  for (const part of value.split(",")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    if (trimmed.includes("-")) {
+      const [start, end] = trimmed.split("-").map(Number);
+      for (let i = start; i <= end; i++) pageNumbers.push(i);
+    } else {
+      pageNumbers.push(Number(trimmed));
+    }
+  }
+  return pageNumbers;
 }
 
 function formatResult(result: ParseResult, format: OutputFormat): string {

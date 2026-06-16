@@ -31,6 +31,26 @@ console.log(result.text);          // full document text
 console.log(result.pages[0]);      // per-page items with bboxes
 ```
 
+## Layout screenshots
+
+When using a layout-enabled build, `layoutScreenshots()` returns PNG images with
+the detected layout boxes and labels drawn into the image:
+
+```ts
+const parser = new LiteParse({
+  ocrEnabled: false,
+  layoutEnabled: true,
+});
+
+const screenshots = await parser.layoutScreenshots(bytes);
+for (const page of screenshots) {
+  const url = URL.createObjectURL(
+    new Blob([page.imageBytes], { type: "image/png" }),
+  );
+  imageElement.src = url;
+}
+```
+
 ## Config options
 
 All optional, camelCase:

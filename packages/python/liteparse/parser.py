@@ -232,6 +232,43 @@ class LiteParse:
         except Exception as e:
             raise ParseError(str(e)) from e
 
+    def layout_screenshot(
+        self,
+        file_path: Union[str, Path],
+        *,
+        page_numbers: Optional[List[int]] = None,
+    ) -> List[ScreenshotResult]:
+        """
+        Generate screenshots annotated with detected layout boxes.
+
+        Args:
+            file_path: Path to the document file (PDF, DOCX, images, etc.).
+            page_numbers: Specific page numbers to render (1-indexed).
+
+        Returns:
+            List of ScreenshotResult with annotated PNG image bytes.
+        """
+        file_path = Path(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        try:
+            native_results = self._native.layout_screenshot(
+                str(file_path.absolute()),
+                page_numbers,
+            )
+            return [
+                ScreenshotResult(
+                    page_num=r.page_num,
+                    width=r.width,
+                    height=r.height,
+                    image_bytes=r.image_bytes,
+                )
+                for r in native_results
+            ]
+        except Exception as e:
+            raise ParseError(str(e)) from e
+
     def get_config(self) -> LiteParseConfig:
         """Return the resolved configuration."""
         cfg = self._native.config

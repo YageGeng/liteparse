@@ -7,7 +7,7 @@
 
 mod wasi_stubs;
 
-use js_sys::{Function, Reflect, Uint8Array};
+use js_sys::{Array, Function, Object, Reflect, Uint8Array};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -412,6 +412,12 @@ impl LiteParse {
         markdown::format_markdown(&result.pages)
     }
 
+    fn set_object_property(obj: &Object, key: &str, value: &JsValue) -> Result<(), JsError> {
+        Reflect::set(obj, &JsValue::from_str(key), value)
+            .map(|_| ())
+            .map_err(|_| JsError::new("serialize layout screenshot result failed"))
+    }
+
     /// Construct a new parser. `config` is a JS object (all fields optional).
     /// If `config.ocrEngine` is present, it is wired up as the OCR backend.
     #[wasm_bindgen(constructor)]
@@ -539,6 +545,31 @@ impl LiteParse {
             .await
             .map_err(|e| JsError::new(&format!("parse failed: {}", e)))?;
         Ok(Self::format_cli_markdown(&result))
+    }
+
+    /// Parse PDF bytes and return PNG screenshots annotated with detected layout boxes.
+    #[wasm_bindgen(js_name = layoutScreenshots)]
+    pub async fn layout_screenshots(&self, data: Vec<u8>) -> Result<JsValue, JsError> {
+        Self::log_layout_state("layoutScreenshots:start", &self.config);
+        let results = self
+            .inner
+            .layout_screenshot_input(PdfInput::Bytes(data), None)
+            .await
+            .map_err(|e| JsError::new(&format!("layout screenshot failed: {}", e)))?;
+
+        let array = Array::new();
+        for result in results {
+            let obj = Object::new();
+            Self::set_object_property(&obj, "pageNum", &JsValue::from_f64(result.page_num as f64))?;
+            Self::set_object_property(&obj, "width", &JsValue::from_f64(result.width as f64))?;
+            Self::set_object_property(&obj, "height", &JsValue::from_f64(result.height as f64))?;
+            let bytes = Uint8Array::new_with_length(result.image_bytes.len() as u32);
+            bytes.copy_from(&result.image_bytes);
+            Self::set_object_property(&obj, "imageBytes", &bytes)?;
+            array.push(&obj);
+        }
+
+        Ok(array.into())
     }
 }
 

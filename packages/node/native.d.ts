@@ -94,6 +94,8 @@ export declare class LiteParse {
    * LibreOffice/ImageMagick are available.
    */
   screenshot(input: string | Buffer, pageNumbers?: Array<number> | undefined | null): Promise<Array<JsScreenshotResult>>
+  /** Take screenshots annotated with detected layout boxes. */
+  layoutScreenshot(input: string | Buffer, pageNumbers?: Array<number> | undefined | null): Promise<Array<JsScreenshotResult>>
   /** Get the current configuration. */
   get config(): JsLiteParseConfig
 }
