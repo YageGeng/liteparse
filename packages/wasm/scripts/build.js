@@ -29,7 +29,10 @@ if (feature) {
 
 // PDFium's Wasm archive imports the __c_longjmp exception tag. The generated
 // JS glue provides that tag after patching, so rust-lld must keep it undefined.
-const rustflags = [process.env.RUSTFLAGS, "-C link-arg=--allow-undefined"]
+const wasmTargetRustflags = [
+  process.env.CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS,
+  "-C link-arg=--allow-undefined",
+]
   .filter(Boolean)
   .join(" ");
 
@@ -37,7 +40,7 @@ const build = spawnSync("wasm-pack", wasmPackArgs, {
   cwd: join(__dirname, ".."),
   env: {
     ...process.env,
-    RUSTFLAGS: rustflags,
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS: wasmTargetRustflags,
   },
   stdio: "inherit",
 });

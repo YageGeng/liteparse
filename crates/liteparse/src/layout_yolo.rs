@@ -1,5 +1,6 @@
 use crate::config::LiteParseConfig;
 use crate::error::LiteParseError;
+use crate::layout_order;
 use crate::types::LayoutBlock;
 use liteparse_layout_yolo::{LayoutDetection, PageImage, YoloLayoutDetector, YoloLayoutOptions};
 
@@ -108,14 +109,8 @@ impl LayoutDetector {
     }
 
     /// Convert YOLO detections into stable page-local layout blocks.
-    fn detections_to_blocks(mut detections: Vec<LayoutDetection>) -> Vec<LayoutBlock> {
-        detections.sort_by(|a, b| {
-            a.y.partial_cmp(&b.y)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal))
-        });
-
-        detections
+    fn detections_to_blocks(detections: Vec<LayoutDetection>) -> Vec<LayoutBlock> {
+        let blocks = detections
             .into_iter()
             .enumerate()
             .map(|(id, detection)| LayoutBlock {
@@ -127,7 +122,19 @@ impl LayoutDetector {
                 width: detection.width,
                 height: detection.height,
             })
-            .collect()
+            .collect();
+
+        Self::order_layout_blocks_xy_cut(blocks)
+    }
+
+    /// Sort layout blocks with the detector's reading-order strategy.
+    ///
+    /// Keep this as the layout detector boundary because YOLO detections are
+    /// where region-level reading order is established. The standalone
+    /// `layout_order` module keeps the XY-cut implementation independently
+    /// testable.
+    fn order_layout_blocks_xy_cut(blocks: Vec<LayoutBlock>) -> Vec<LayoutBlock> {
+        layout_order::order_layout_blocks_xy_cut(blocks)
     }
 
     /// Build YOLO detector options from the public LiteParse configuration.
@@ -169,5 +176,30 @@ mod tests {
         assert_eq!(blocks[0].label, "Title");
         assert_eq!(blocks[0].id, 0);
         assert_eq!(blocks[1].id, 1);
+    }
+
+    #[test]
+    fn order_layout_blocks_xy_cut_reads_columns_top_to_bottom() {
+        let blocks = LayoutDetector::order_layout_blocks_xy_cut(vec![
+            block(0, "left-1", 40.0, 40.0, 180.0, 40.0),
+            block(1, "right-1", 320.0, 40.0, 180.0, 40.0),
+            block(2, "left-2", 40.0, 120.0, 180.0, 40.0),
+            block(3, "right-2", 320.0, 120.0, 180.0, 40.0),
+        ]);
+
+        let labels: Vec<&str> = blocks.iter().map(|block| block.label.as_str()).collect();
+        assert_eq!(labels, vec!["left-1", "left-2", "right-1", "right-2"]);
+    }
+
+    fn block(id: usize, label: &str, x: f32, y: f32, width: f32, height: f32) -> LayoutBlock {
+        LayoutBlock {
+            id,
+            label: label.into(),
+            confidence: 0.9,
+            x,
+            y,
+            width,
+            height,
+        }
     }
 }

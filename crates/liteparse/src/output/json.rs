@@ -1,3 +1,4 @@
+use crate::projection;
 use crate::types::{LayoutBlock, ParsedPage, TextItem};
 use serde::Serialize;
 
@@ -56,24 +57,30 @@ pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
                 layout_blocks: page
                     .layout_blocks
                     .iter()
-                    .map(|block| layout_block_to_json(block, &page.text_items))
+                    .map(|block| layout_block_to_json(page, block))
                     .collect(),
             })
             .collect(),
     }
 }
 
-fn layout_block_to_json(block: &LayoutBlock, text_items: &[TextItem]) -> JsonLayoutBlock {
-    let text_items: Vec<JsonTextItem> = text_items
+fn layout_block_to_json(page: &ParsedPage, block: &LayoutBlock) -> JsonLayoutBlock {
+    let block_items: Vec<TextItem> = page
+        .text_items
         .iter()
         .filter(|item| item.layout_block_id == Some(block.id))
-        .map(text_item_to_json)
+        .cloned()
         .collect();
-    let text = text_items
-        .iter()
-        .map(|item| item.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+
+    let text_items: Vec<JsonTextItem> = block_items.iter().map(text_item_to_json).collect();
+    let text = projection::project_text_items_to_text(
+        page.page_number,
+        page.page_width,
+        page.page_height,
+        block_items,
+    )
+    .trim()
+    .to_string();
 
     JsonLayoutBlock {
         id: block.id,
@@ -230,5 +237,29 @@ mod tests {
         );
         let s = serde_json::to_string(&j.pages[0]).unwrap();
         assert!(!s.contains("\"text_items\":[{\"text\":\"outside\""));
+    }
+
+    #[test]
+    fn test_build_json_projects_layout_block_text() {
+        let mut first = item("hello", None);
+        first.x = 10.0;
+        first.y = 20.0;
+        first.width = 20.0;
+        first.height = 10.0;
+        first.layout_block_id = Some(2);
+
+        let mut second = item("world", None);
+        second.x = 38.0;
+        second.y = 20.0;
+        second.width = 22.0;
+        second.height = 10.0;
+        second.layout_block_id = Some(2);
+
+        let mut page = page(vec![first, second]);
+        page.layout_blocks = vec![layout_block()];
+
+        let j = build_json(&[page]);
+
+        assert_eq!(j.pages[0].layout_blocks[0].text, "hello world");
     }
 }

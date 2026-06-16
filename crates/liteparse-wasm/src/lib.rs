@@ -15,6 +15,7 @@ use wasm_bindgen_futures::JsFuture;
 use liteparse::config::{LiteParseConfig, OutputFormat};
 use liteparse::ocr::{OcrEngine, OcrFuture, OcrOptions, OcrResult};
 use liteparse::parser::LiteParse as CoreLiteParse;
+use liteparse::projection;
 use liteparse::search;
 use liteparse::types::{LayoutBlock, PdfInput, TextItem};
 
@@ -201,17 +202,29 @@ struct JsLayoutBlock<'a> {
 
 impl<'a> JsLayoutBlock<'a> {
     /// Create a JS-facing layout block with the text items assigned to it.
-    fn from_rust(block: &'a LayoutBlock, text_items: &'a [TextItem]) -> Self {
-        let text_items: Vec<JsTextItem<'a>> = text_items
+    fn from_rust(
+        block: &'a LayoutBlock,
+        page_number: usize,
+        page_width: f32,
+        page_height: f32,
+        text_items: &'a [TextItem],
+    ) -> Self {
+        let block_items: Vec<&'a TextItem> = text_items
             .iter()
             .filter(|item| item.layout_block_id == Some(block.id))
-            .map(JsTextItem::from_rust)
             .collect();
-        let text = text_items
+        let text_items: Vec<JsTextItem<'a>> = block_items
             .iter()
-            .map(|item| item.text)
-            .collect::<Vec<_>>()
-            .join("\n");
+            .map(|item| JsTextItem::from_rust(item))
+            .collect();
+        let text = projection::project_text_items_to_text(
+            page_number,
+            page_width,
+            page_height,
+            block_items.into_iter().cloned().collect(),
+        )
+        .trim()
+        .to_string();
 
         Self {
             id: block.id,
@@ -461,7 +474,15 @@ impl LiteParse {
                 layout_blocks: p
                     .layout_blocks
                     .iter()
-                    .map(|b| JsLayoutBlock::from_rust(b, &p.text_items))
+                    .map(|b| {
+                        JsLayoutBlock::from_rust(
+                            b,
+                            p.page_number,
+                            p.page_width,
+                            p.page_height,
+                            &p.text_items,
+                        )
+                    })
                     .collect(),
             })
             .collect();

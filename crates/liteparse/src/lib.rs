@@ -15,6 +15,8 @@ pub use types::{ParsedPage, TextItem};
 pub mod config;
 pub mod error;
 pub mod layout_merge;
+#[doc(hidden)]
+pub mod layout_order;
 pub mod parser;
 pub mod search;
 pub mod types;

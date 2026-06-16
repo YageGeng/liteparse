@@ -463,6 +463,13 @@ impl LiteParse {
                 &mut parsed_page.layout_blocks,
                 &mut parsed_page.text_items,
             );
+            // The initial page text is produced before layout assignment, so it
+            // only knows about item-level geometry. Once layout blocks are
+            // available, rebuild the plain text from those blocks so the
+            // detected reading order affects user-facing text output too.
+            if let Some(layout_text) = parsed_page.rebuild_text_in_layout_order() {
+                parsed_page.text = layout_text;
+            }
             let assigned = parsed_page
                 .text_items
                 .iter()
@@ -594,9 +601,76 @@ impl LiteParse {
     }
 }
 
+impl ParsedPage {
+    /// Rebuild page text by walking layout blocks in their reading order.
+    ///
+    /// Layout detection provides coarse document regions, which is a better
+    /// ordering signal for multi-column pages than sorting all text items by
+    /// page y/x. Each block is still rendered through the normal projection
+    /// pipeline so local line grouping, spacing, and table-like alignment keep
+    /// the existing behavior. Text that could not be assigned to any block is
+    /// appended at the end instead of being dropped.
+    fn rebuild_text_in_layout_order(&self) -> Option<String> {
+        if self.layout_blocks.is_empty() {
+            return None;
+        }
+
+        let mut sections = Vec::new();
+
+        for block in &self.layout_blocks {
+            // Re-project each block's items independently. This keeps the
+            // block-level order from XY-cut while preserving the mature
+            // item-level layout reconstruction inside the block.
+            let block_items: Vec<_> = self
+                .text_items
+                .iter()
+                .filter(|item| item.layout_block_id == Some(block.id))
+                .cloned()
+                .collect();
+            let text = projection::project_text_items_to_text(
+                self.page_number,
+                self.page_width,
+                self.page_height,
+                block_items,
+            );
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                sections.push(trimmed.to_string());
+            }
+        }
+
+        // Layout detectors can miss headers, footers, marginalia, or low
+        // confidence regions. Keep that text after the ordered blocks so the
+        // parser remains lossless even when layout assignment is imperfect.
+        let unassigned_items: Vec<_> = self
+            .text_items
+            .iter()
+            .filter(|item| item.layout_block_id.is_none())
+            .cloned()
+            .collect();
+        let unassigned_text = projection::project_text_items_to_text(
+            self.page_number,
+            self.page_width,
+            self.page_height,
+            unassigned_items,
+        );
+        let unassigned_trimmed = unassigned_text.trim();
+        if !unassigned_trimmed.is_empty() {
+            sections.push(unassigned_trimmed.to_string());
+        }
+
+        if sections.is_empty() {
+            None
+        } else {
+            Some(sections.join("\n\n"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{LayoutBlock, ParsedPage, TextItem};
 
     #[test]
     #[allow(clippy::field_reassign_with_default)]
@@ -607,5 +681,56 @@ mod tests {
         let lp = LiteParse::new(cfg);
         assert!(!lp.config().ocr_enabled);
         assert_eq!(lp.config().max_pages, 7);
+    }
+
+    fn text_item(text: &str, x: f32, y: f32, layout_block_id: Option<usize>) -> TextItem {
+        TextItem {
+            text: text.into(),
+            x,
+            y,
+            width: 80.0,
+            height: 12.0,
+            layout_block_id,
+            ..Default::default()
+        }
+    }
+
+    fn block(id: usize, label: &str, x: f32, y: f32, width: f32, height: f32) -> LayoutBlock {
+        LayoutBlock {
+            id,
+            label: label.into(),
+            confidence: 0.9,
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn rebuilds_page_text_in_layout_block_order() {
+        let page = ParsedPage {
+            page_number: 1,
+            page_width: 600.0,
+            page_height: 800.0,
+            text: "left-1 right-1\nleft-2 right-2".into(),
+            text_items: vec![
+                text_item("left-1", 40.0, 40.0, Some(0)),
+                text_item("right-1", 320.0, 40.0, Some(2)),
+                text_item("left-2", 40.0, 100.0, Some(1)),
+                text_item("right-2", 320.0, 100.0, Some(3)),
+            ],
+            layout_blocks: vec![
+                block(0, "left-1", 40.0, 40.0, 180.0, 30.0),
+                block(1, "left-2", 40.0, 100.0, 180.0, 30.0),
+                block(2, "right-1", 320.0, 40.0, 180.0, 30.0),
+                block(3, "right-2", 320.0, 100.0, 180.0, 30.0),
+            ],
+        };
+
+        assert_eq!(
+            page.rebuild_text_in_layout_order().as_deref(),
+            Some("left-1\n\nleft-2\n\nright-1\n\nright-2")
+        );
     }
 }

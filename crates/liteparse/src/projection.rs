@@ -2719,6 +2719,28 @@ pub fn project_pages_to_grid(pages: Vec<Page>) -> Vec<ParsedPage> {
         .collect()
 }
 
+#[doc(hidden)]
+pub fn project_text_items_to_text(
+    page_number: usize,
+    page_width: f32,
+    page_height: f32,
+    text_items: Vec<TextItem>,
+) -> String {
+    // Used by layout-ordered text rebuilds: run a subset of page items through
+    // the same projection path as a full page so block-local text keeps the
+    // normal spacing, line grouping, and rotation handling.
+    project_pages_to_grid(vec![Page {
+        page_number,
+        page_width,
+        page_height,
+        text_items,
+    }])
+    .into_iter()
+    .next()
+    .map(|page| page.text)
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
