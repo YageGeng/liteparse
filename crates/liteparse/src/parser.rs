@@ -9,10 +9,11 @@ use crate::ocr::http_simple::HttpOcrEngine;
 #[cfg(feature = "tesseract")]
 use crate::ocr::tesseract::TesseractOcrEngine;
 use crate::ocr_merge;
+use crate::output::markdown;
 use crate::projection;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::render;
-use crate::types::{ParsedPage, PdfInput};
+use crate::types::{ExtractedImage, OutlineTarget, Page, ParsedPage, PdfInput};
 use pdfium::Library;
 
 /// Result of parsing a document.
@@ -21,6 +22,14 @@ pub struct ParseResult {
     pub pages: Vec<ParsedPage>,
     /// Full document text, concatenated from all pages.
     pub text: String,
+    /// Document outline (bookmarks) when present. Used by the markdown
+    /// emitter as a high-priority heading source on untagged PDFs.
+    pub outline: Vec<OutlineTarget>,
+    /// Raster images extracted from the document. Empty unless the parser
+    /// was configured with `ImageMode::Embed`. Each entry carries the same
+    /// `id` the markdown emitter referenced in `![](image_{id}.png)`, so the
+    /// caller can match them up without parsing markdown.
+    pub images: Vec<ExtractedImage>,
 }
 
 /// Result of rendering a single page screenshot.
@@ -113,53 +122,48 @@ impl LiteParse {
             .map_err(|e| format!("invalid --target-pages: {}", e))?;
 
         // Extract text (and pre-render OCR pages in one PDF load when OCR is on).
-        //
         // The PDFium lock is acquired for this entire critical section and
         // released before any `.await` below — OCR (network / CPU) and grid
         // projection (pure Rust) do not touch PDFium, so they can run
         // concurrently with other `LiteParse` calls.
         let password = self.config.password.as_deref();
-        let (mut pages, ocr_rendered) = {
+        let render_images = matches!(self.config.image_mode, crate::config::ImageMode::Embed);
+        let (pages, ocr_rendered, outline, images) = {
             let lib = Library::init();
-            if self.config.ocr_enabled {
-                let document = extract::load_document_from_input(&lib, &validated_input, password)?;
-                let pages = extract::extract_pages_from_document(
-                    &document,
-                    target_pages.as_deref(),
-                    self.config.max_pages,
-                )?;
-                let t_extract = web_time::Instant::now();
-                log(&format!(
-                    "[liteparse] extract: {:.1}ms ({} pages)",
-                    t_extract.duration_since(t0).as_secs_f64() * 1000.0,
-                    pages.len()
-                ));
-                let rendered = ocr_merge::render_pages_for_ocr(&document, &pages, self.config.dpi)?;
+            let document = extract::load_document_from_input(&lib, &validated_input, password)?;
+            let outline = extract::extract_outline(&document);
+            let (pages, images) = extract::extract_pages_and_images(
+                &document,
+                target_pages.as_deref(),
+                self.config.max_pages,
+                render_images,
+                self.config.extract_links
+                    && self.config.output_format == crate::config::OutputFormat::Markdown,
+            )?;
+            let t_extract = web_time::Instant::now();
+            log(&format!(
+                "[liteparse] extract: {:.1}ms ({} pages)",
+                t_extract.duration_since(t0).as_secs_f64() * 1000.0,
+                pages.len()
+            ));
+            let rendered = if self.config.ocr_enabled {
+                let r = ocr_merge::render_pages_for_ocr(&document, &pages, self.config.dpi)?;
                 log(&format!(
                     "[liteparse] ocr render: {:.1}ms ({} pages)",
                     web_time::Instant::now()
                         .duration_since(t_extract)
                         .as_secs_f64()
                         * 1000.0,
-                    rendered.len()
+                    r.len()
                 ));
-                (pages, rendered)
+                r
             } else {
-                let document = extract::load_document_from_input(&lib, &validated_input, password)?;
-                let pages = extract::extract_pages_from_document(
-                    &document,
-                    target_pages.as_deref(),
-                    self.config.max_pages,
-                )?;
-                log(&format!(
-                    "[liteparse] extract: {:.1}ms ({} pages)",
-                    web_time::Instant::now().duration_since(t0).as_secs_f64() * 1000.0,
-                    pages.len()
-                ));
-                (pages, Vec::new())
-            }
+                Vec::new()
+            };
             // `lib` is dropped here, releasing the PDFium lock.
+            (pages, rendered, outline, images)
         };
+        let mut pages = pages;
         let t1 = web_time::Instant::now();
 
         // OCR pass
@@ -172,7 +176,10 @@ impl LiteParse {
                 #[cfg(not(target_arch = "wasm32"))]
                 {
                     if let Some(ref url) = self.config.ocr_server_url {
-                        std::sync::Arc::new(HttpOcrEngine::new(url.clone()))
+                        std::sync::Arc::new(HttpOcrEngine::with_headers(
+                            url.clone(),
+                            self.config.ocr_server_headers.clone(),
+                        ))
                     } else {
                         #[cfg(feature = "tesseract")]
                         {
@@ -217,19 +224,60 @@ impl LiteParse {
             t2.duration_since(t_ocr).as_secs_f64() * 1000.0
         ));
 
-        let full_text = parsed_pages
-            .iter()
-            .map(|p| p.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let full_text = if self.config.output_format == crate::config::OutputFormat::Markdown {
+            let md = markdown::format_markdown(&parsed_pages, &outline, self.config.image_mode);
+            let t3 = web_time::Instant::now();
+            log(&format!(
+                "[liteparse] markdown: {:.1}ms",
+                t3.duration_since(t2).as_secs_f64() * 1000.0
+            ));
+            md
+        } else {
+            parsed_pages
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
 
-        let total = t2.duration_since(t0).as_secs_f64() * 1000.0;
+        let total = web_time::Instant::now().duration_since(t0).as_secs_f64() * 1000.0;
         log(&format!("[liteparse] total: {:.1}ms", total));
 
         Ok(ParseResult {
             pages: parsed_pages,
             text: full_text,
+            outline,
+            images,
         })
+    }
+
+    /// Parse from pre-extracted pages, skipping PDFium text extraction.
+    ///
+    /// The caller supplies `Page`s already populated with text items (and,
+    /// optionally, graphics / struct nodes / image refs) in viewport space
+    /// (top-left origin, 72 DPI). This runs only grid projection and the
+    /// configured output formatter, so it touches neither PDFium nor OCR and
+    /// is fully synchronous. Used when an external extractor (e.g. with its
+    /// own font-recovery pipeline) owns text extraction.
+    pub fn parse_from_pages(&self, pages: Vec<Page>, outline: Vec<OutlineTarget>) -> ParseResult {
+        let parsed_pages = projection::project_pages_to_grid(pages);
+
+        let full_text = if self.config.output_format == crate::config::OutputFormat::Markdown {
+            markdown::format_markdown(&parsed_pages, &outline, self.config.image_mode)
+        } else {
+            parsed_pages
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+
+        ParseResult {
+            pages: parsed_pages,
+            text: full_text,
+            outline,
+            images: Vec::new(),
+        }
     }
 
     /// Generate screenshots of document pages as PNG bytes.

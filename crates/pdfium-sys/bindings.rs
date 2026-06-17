@@ -1170,6 +1170,12 @@ unsafe extern "C" {
     ) -> FPDF_PAGEOBJECTMARK;
 }
 unsafe extern "C" {
+    pub fn FPDFPageObj_AddExistingMark(
+        page_object: FPDF_PAGEOBJECT,
+        mark: FPDF_PAGEOBJECTMARK,
+    ) -> FPDF_BOOL;
+}
+unsafe extern "C" {
     pub fn FPDFPageObj_RemoveMark(
         page_object: FPDF_PAGEOBJECT,
         mark: FPDF_PAGEOBJECTMARK,
@@ -1585,6 +1591,9 @@ unsafe extern "C" {
     pub fn FPDFTextObj_GetFontSize(text: FPDF_PAGEOBJECT, size: *mut f32) -> FPDF_BOOL;
 }
 unsafe extern "C" {
+    pub fn FPDFTextObj_SetFontSize(text: FPDF_PAGEOBJECT, size: f32) -> FPDF_BOOL;
+}
+unsafe extern "C" {
     pub fn FPDFFont_Close(font: FPDF_FONT);
 }
 unsafe extern "C" {
@@ -1691,6 +1700,27 @@ unsafe extern "C" {
         char_code: u32,
         font_size: f32,
     ) -> FPDF_GLYPHPATH;
+}
+unsafe extern "C" {
+    pub fn FPDFFont_HasToUnicode(font: FPDF_FONT) -> FPDF_BOOL;
+}
+unsafe extern "C" {
+    pub fn FPDFFont_GetCharGlyphName(
+        font: FPDF_FONT,
+        char_code: u32,
+        buffer: *mut ::std::os::raw::c_char,
+        length: ::std::os::raw::c_ulong,
+    ) -> ::std::os::raw::c_ulong;
+}
+unsafe extern "C" {
+    pub fn FPDFFont_GetEncoding(
+        font: FPDF_FONT,
+        buffer: *mut ::std::os::raw::c_char,
+        length: ::std::os::raw::c_ulong,
+    ) -> ::std::os::raw::c_ulong;
+}
+unsafe extern "C" {
+    pub fn FPDFFont_GetCharGlyphIndex(font: FPDF_FONT, char_code: u32) -> ::std::os::raw::c_int;
 }
 unsafe extern "C" {
     pub fn FPDFGlyphPath_CountGlyphSegments(glyphpath: FPDF_GLYPHPATH) -> ::std::os::raw::c_int;

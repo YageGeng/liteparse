@@ -28,6 +28,8 @@ export interface LiteParseNativeConfig {
   targetPages?: string;
   dpi?: number;
   outputFormat?: string;
+  imageMode?: string;
+  extractLinks?: boolean;
   preserveVerySmallText?: boolean;
   password?: string;
   quiet?: boolean;
@@ -43,6 +45,32 @@ export interface NativeTextItem {
   fontName?: string;
   fontSize?: number;
   confidence?: number;
+  rotation?: number;
+}
+
+export interface NativeGraphic {
+  kind: string;
+  x1?: number;
+  y1?: number;
+  x2?: number;
+  y2?: number;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  hasFill?: boolean;
+  hasStroke?: boolean;
+  fillColor?: string;
+  strokeColor?: string;
+  lineWidth?: number;
+}
+
+export interface NativePageInput {
+  pageNumber: number;
+  pageWidth: number;
+  pageHeight: number;
+  textItems: NativeTextItem[];
+  graphics?: NativeGraphic[];
 }
 
 export interface NativeParsedPage {
@@ -53,9 +81,17 @@ export interface NativeParsedPage {
   textItems: NativeTextItem[];
 }
 
+export interface NativeExtractedImage {
+  id: string;
+  page: number;
+  format: string;
+  bytes: Buffer;
+}
+
 export interface NativeParseResult {
   pages: NativeParsedPage[];
   text: string;
+  images: NativeExtractedImage[];
 }
 
 export interface NativeScreenshotResult {
@@ -67,6 +103,7 @@ export interface NativeScreenshotResult {
 
 export interface LiteParseNative {
   parse(input: string | Buffer): Promise<NativeParseResult>;
+  parsePages(pages: NativePageInput[]): NativeParseResult;
   screenshot(
     input: string | Buffer,
     pageNumbers?: number[] | null,

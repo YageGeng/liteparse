@@ -4,7 +4,9 @@ import {
   type LiteParseNativeConfig,
   type NativeParseResult,
   type NativeParsedPage,
+  type NativePageInput,
   type NativeTextItem,
+  type NativeExtractedImage,
 } from "./native.js";
 
 // ---------------------------------------------------------------------------
@@ -12,7 +14,8 @@ import {
 // ---------------------------------------------------------------------------
 
 export type LiteParseInput = string | Buffer | Uint8Array;
-export type OutputFormat = "json" | "text";
+export type OutputFormat = "json" | "text" | "markdown";
+export type ImageMode = "off" | "placeholder" | "embed";
 
 export interface LiteParseConfig {
   ocrLanguage: string;
@@ -23,6 +26,10 @@ export interface LiteParseConfig {
   targetPages?: string;
   dpi: number;
   outputFormat: OutputFormat;
+  /** How to surface raster images in markdown output (default: "placeholder"). */
+  imageMode: ImageMode;
+  /** Render hyperlink annotations as `[text](url)` in markdown output (default: true). */
+  extractLinks: boolean;
   preserveVerySmallText: boolean;
   password?: string;
   quiet: boolean;
@@ -38,6 +45,46 @@ export interface TextItem {
   fontName?: string;
   fontSize?: number;
   confidence?: number;
+  /** Rotation in degrees (viewport space). Defaults to 0 when omitted. */
+  rotation?: number;
+}
+
+/**
+ * A vector-graphic primitive supplied to {@link LiteParse.parsePages}. `kind`
+ * selects the variant: `"stroke"` (uses `x1/y1/x2/y2`) or `"rect"` (uses
+ * `x/y/width/height`, top-left origin). Coordinates are viewport space (72 DPI),
+ * matching the text items. `hasFill`/`hasStroke` carry the paint intent even
+ * when the color is unknown, so ruled-table edge detection still treats a
+ * colorless stroked rect as stroked.
+ */
+export interface Graphic {
+  kind: "stroke" | "rect";
+  x1?: number;
+  y1?: number;
+  x2?: number;
+  y2?: number;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  hasFill?: boolean;
+  hasStroke?: boolean;
+  fillColor?: string;
+  strokeColor?: string;
+  lineWidth?: number;
+}
+
+/**
+ * A page of pre-extracted text supplied to {@link LiteParse.parsePages}.
+ * Coordinates are viewport space (top-left origin, 72 DPI). `graphics` is
+ * optional; when supplied it enables ruled-table and horizontal-rule detection.
+ */
+export interface PageInput {
+  pageNumber: number;
+  pageWidth: number;
+  pageHeight: number;
+  textItems: TextItem[];
+  graphics?: Graphic[];
 }
 
 export interface ParsedPage {
@@ -48,9 +95,19 @@ export interface ParsedPage {
   textItems: TextItem[];
 }
 
+export interface ExtractedImage {
+  /** Reference id used in the markdown output (e.g. `![](image_p1_0.png)` → `"p1_0"`). */
+  id: string;
+  page: number;
+  format: string;
+  bytes: Buffer;
+}
+
 export interface ParseResult {
   pages: ParsedPage[];
   text: string;
+  /** Populated only when configured with `imageMode: "embed"`. */
+  images: ExtractedImage[];
 }
 
 export interface ScreenshotResult {
@@ -78,6 +135,8 @@ export class LiteParse {
       targetPages: userConfig.targetPages,
       dpi: userConfig.dpi,
       outputFormat: userConfig.outputFormat,
+      imageMode: userConfig.imageMode,
+      extractLinks: userConfig.extractLinks,
       preserveVerySmallText: userConfig.preserveVerySmallText,
       password: userConfig.password,
       quiet: userConfig.quiet,
@@ -97,6 +156,8 @@ export class LiteParse {
       targetPages: resolved.targetPages ?? undefined,
       dpi: resolved.dpi ?? 150,
       outputFormat: (resolved.outputFormat as OutputFormat) ?? "json",
+      imageMode: (resolved.imageMode as ImageMode) ?? "placeholder",
+      extractLinks: resolved.extractLinks ?? true,
       preserveVerySmallText: resolved.preserveVerySmallText ?? false,
       password: resolved.password ?? undefined,
       quiet: resolved.quiet ?? false,
@@ -112,6 +173,29 @@ export class LiteParse {
     return {
       pages: result.pages.map(toPage),
       text: result.text,
+      images: (result.images ?? []).map(toImage),
+    };
+  }
+
+  /**
+   * Parse from pre-extracted pages, skipping PDFium text extraction. Runs only
+   * grid projection + the configured output formatter, so the caller's own
+   * text-extraction / font-recovery owns the text content. Synchronous: no
+   * PDFium load and no OCR on this path.
+   */
+  parsePages(pages: PageInput[]): ParseResult {
+    const nativePages: NativePageInput[] = pages.map((p) => ({
+      pageNumber: p.pageNumber,
+      pageWidth: p.pageWidth,
+      pageHeight: p.pageHeight,
+      textItems: p.textItems,
+      graphics: p.graphics,
+    }));
+    const result = this._native.parsePages(nativePages);
+    return {
+      pages: result.pages.map(toPage),
+      text: result.text,
+      images: (result.images ?? []).map(toImage),
     };
   }
 
@@ -145,6 +229,15 @@ function toPage(p: NativeParsedPage): ParsedPage {
     height: p.height,
     text: p.text,
     textItems: p.textItems.map(toTextItem),
+  };
+}
+
+function toImage(img: NativeExtractedImage): ExtractedImage {
+  return {
+    id: img.id,
+    page: img.page,
+    format: img.format,
+    bytes: img.bytes,
   };
 }
 

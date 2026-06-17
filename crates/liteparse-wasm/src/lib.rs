@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-use liteparse::config::{LiteParseConfig, OutputFormat};
+use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
 use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult};
 use liteparse::parser::LiteParse as CoreLiteParse;
 use liteparse::search;
@@ -45,6 +45,8 @@ struct JsLiteParseConfig {
     target_pages: Option<String>,
     dpi: Option<f32>,
     output_format: Option<String>,
+    image_mode: Option<String>,
+    extract_links: Option<bool>,
     preserve_very_small_text: Option<bool>,
     password: Option<String>,
     quiet: Option<bool>,
@@ -78,13 +80,24 @@ impl JsLiteParseConfig {
             cfg.output_format = match v.as_str() {
                 "json" => OutputFormat::Json,
                 "text" => OutputFormat::Text,
+                "markdown" | "md" => OutputFormat::Markdown,
                 other => {
                     return Err(JsError::new(&format!(
-                        "invalid outputFormat: {} (expected 'json' or 'text')",
+                        "invalid outputFormat: {} (expected 'json', 'text', or 'markdown')",
                         other
                     )));
                 }
             };
+        }
+        if let Some(v) = self.image_mode {
+            cfg.image_mode = match v.as_str() {
+                "off" | "none" => ImageMode::Off,
+                "embed" => ImageMode::Embed,
+                _ => ImageMode::Placeholder,
+            };
+        }
+        if let Some(v) = self.extract_links {
+            cfg.extract_links = v;
         }
         if let Some(v) = self.preserve_very_small_text {
             cfg.preserve_very_small_text = v;
@@ -111,7 +124,14 @@ impl JsLiteParseConfig {
             output_format: Some(match cfg.output_format {
                 OutputFormat::Json => "json".into(),
                 OutputFormat::Text => "text".into(),
+                OutputFormat::Markdown => "markdown".into(),
             }),
+            image_mode: Some(match cfg.image_mode {
+                ImageMode::Off => "off".into(),
+                ImageMode::Placeholder => "placeholder".into(),
+                ImageMode::Embed => "embed".into(),
+            }),
+            extract_links: Some(cfg.extract_links),
             preserve_very_small_text: Some(cfg.preserve_very_small_text),
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),
@@ -154,6 +174,19 @@ struct JsParsedPage<'a> {
 struct JsParseResult<'a> {
     pages: Vec<JsParsedPage<'a>>,
     text: &'a str,
+    images: Vec<JsExtractedImage<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsExtractedImage<'a> {
+    id: &'a str,
+    page: u32,
+    format: &'a str,
+    /// Serialized as a JS `number[]`. Callers that want a Uint8Array can
+    /// wrap with `new Uint8Array(image.bytes)`. (Could be upgraded to a real
+    /// Uint8Array later by switching to a hand-rolled to_value path.)
+    bytes: &'a [u8],
 }
 
 // ---------------------------------------------------------------------------
@@ -333,9 +366,20 @@ impl LiteParse {
             })
             .collect();
 
+        let js_images: Vec<JsExtractedImage> = result
+            .images
+            .iter()
+            .map(|img| JsExtractedImage {
+                id: &img.id,
+                page: img.page,
+                format: &img.format,
+                bytes: &img.bytes,
+            })
+            .collect();
         let js_result = JsParseResult {
             pages: js_pages,
             text: &result.text,
+            images: js_images,
         };
 
         serde_wasm_bindgen::to_value(&js_result)

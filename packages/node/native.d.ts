@@ -18,7 +18,7 @@ export interface JsLiteParseConfig {
   targetPages?: string
   /** DPI for rendering pages (used for OCR and screenshots). */
   dpi?: number
-  /** Output format: "json" or "text". */
+  /** Output format: "json", "text", or "markdown". */
   outputFormat?: string
   /** Keep very small text that would normally be filtered out. */
   preserveVerySmallText?: boolean
@@ -28,6 +28,17 @@ export interface JsLiteParseConfig {
   quiet?: boolean
   /** Number of concurrent OCR workers (default: CPU cores - 1). */
   numWorkers?: number
+  /**
+   * How to surface raster images in markdown output: "off", "placeholder"
+   * (default — emits `![](image_pN_K.png)` references with no bytes), or
+   * "embed" (also returns each image's PNG bytes on `images`).
+   */
+  imageMode?: string
+  /**
+   * Render hyperlink annotations as `[text](url)` in markdown output
+   * (default true). Set false for plain anchor text.
+   */
+  extractLinks?: boolean
 }
 export interface JsTextItem {
   text: string
@@ -38,6 +49,51 @@ export interface JsTextItem {
   fontName?: string
   fontSize?: number
   confidence?: number
+  /** Rotation in degrees (viewport space). Defaults to 0 when omitted. */
+  rotation?: number
+}
+/**
+ * A vector-graphic primitive supplied by an external extractor. `kind` selects
+ * the variant: `"stroke"` (uses `x1/y1/x2/y2`) or `"rect"` (uses
+ * `x/y/width/height`). Coordinates are viewport space (top-left origin, 72
+ * DPI), matching the text items. `has_fill`/`has_stroke` carry the paint
+ * intent even when no color is known, so ruled-table edge detection still
+ * treats a colorless stroked rect as stroked.
+ */
+export interface JsGraphic {
+  /** "stroke" or "rect". Anything else is dropped. */
+  kind: string
+  x1?: number
+  y1?: number
+  x2?: number
+  y2?: number
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+  /** Whether the path is filled. Drives Rect `fill` presence. */
+  hasFill?: boolean
+  /** Whether the path is stroked. Drives Rect `stroke` presence. */
+  hasStroke?: boolean
+  /** Fill color as ARGB hex (e.g. "ff000000"). May be absent even when filled. */
+  fillColor?: string
+  /** Stroke color as ARGB hex. May be absent even when stroked. */
+  strokeColor?: string
+  /** Stroke line width in points. */
+  lineWidth?: number
+}
+/**
+ * A page of pre-extracted text supplied by an external extractor. Coordinates
+ * are viewport space (top-left origin, 72 DPI). `graphics` enables ruled-table
+ * and horizontal-rule detection; struct nodes are still unsupported on this
+ * path, so tagged-heading detection remains unavailable until they are added.
+ */
+export interface JsPageInput {
+  pageNumber: number
+  pageWidth: number
+  pageHeight: number
+  textItems: Array<JsTextItem>
+  graphics?: Array<JsGraphic>
 }
 export interface JsParsedPage {
   pageNum: number
@@ -49,6 +105,13 @@ export interface JsParsedPage {
 export interface JsParseResult {
   pages: Array<JsParsedPage>
   text: string
+  images: Array<JsExtractedImage>
+}
+export interface JsExtractedImage {
+  id: string
+  page: number
+  format: string
+  bytes: Buffer
 }
 export interface JsScreenshotResult {
   pageNum: number
@@ -67,6 +130,16 @@ export declare class LiteParse {
   constructor(config?: JsLiteParseConfig | undefined | null)
   /** Parse a document. Accepts a file path (string) or raw PDF bytes (Buffer). */
   parse(input: string | Buffer): Promise<JsParseResult>
+  /**
+   * Parse from pre-extracted pages, skipping PDFium text extraction.
+   *
+   * The caller supplies pages already populated with text items in viewport
+   * space (top-left origin, 72 DPI). Runs only grid projection + the
+   * configured output formatter, so it never loads PDFium. Use when an
+   * external extractor owns text extraction (e.g. to keep its own
+   * font-recovery pipeline).
+   */
+  parsePages(pages: Array<JsPageInput>): JsParseResult
   /**
    * Take screenshots of document pages. Returns PNG image buffers.
    *

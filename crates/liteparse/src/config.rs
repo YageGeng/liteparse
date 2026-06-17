@@ -9,6 +9,10 @@ pub struct LiteParseConfig {
     pub ocr_enabled: bool,
     /// HTTP OCR server URL (uses Tesseract if not provided)
     pub ocr_server_url: Option<String>,
+    /// Extra HTTP headers sent with every request to `ocr_server_url`, as
+    /// `(name, value)` pairs. Use for auth, e.g. `("Authorization", "Bearer …")`.
+    /// Ignored when `ocr_server_url` is None.
+    pub ocr_server_headers: Vec<(String, String)>,
     /// Path to tessdata directory. Falls back to TESSDATA_PREFIX env var if not set.
     pub tessdata_path: Option<String>,
     /// Maximum number of pages to parse.
@@ -27,6 +31,32 @@ pub struct LiteParseConfig {
     pub quiet: bool,
     /// Number of concurrent OCR workers. Defaults to (number of CPU cores - 1), minimum 1.
     pub num_workers: usize,
+    /// Controls how raster images are surfaced in markdown output. Has no
+    /// effect on JSON / text outputs.
+    pub image_mode: ImageMode,
+    /// Extract hyperlink annotations and render them as `[text](url)` in
+    /// markdown output. Default on. Disable for benchmark parity with
+    /// plain-text ground truth (the GT corpora never use link syntax).
+    pub extract_links: bool,
+}
+
+/// Image handling for the markdown emitter.
+///
+/// * `Off` — strip image references entirely.
+/// * `Placeholder` (default) — emit `![](image_pN_K.png)` references in
+///   reading order at each image's y position, but do **not** extract or
+///   return pixel bytes. Keeps response size small while letting the LLM see
+///   where figures live in the document.
+/// * `Embed` — same references, plus bytes returned via `ParseResult.images`.
+///   Opt-in because pixel bytes can dwarf the text payload on image-heavy
+///   PDFs. (Bytes plumbing lands in stage 11b — current variant is parsed but
+///   behaves like `Placeholder` until then.)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageMode {
+    Off,
+    Placeholder,
+    Embed,
 }
 
 /// Supported output formats.
@@ -35,6 +65,7 @@ pub struct LiteParseConfig {
 pub enum OutputFormat {
     Json,
     Text,
+    Markdown,
 }
 
 impl Default for LiteParseConfig {
@@ -43,6 +74,7 @@ impl Default for LiteParseConfig {
             ocr_language: "eng".to_string(),
             ocr_enabled: true,
             ocr_server_url: None,
+            ocr_server_headers: Vec::new(),
             tessdata_path: None,
             max_pages: 1000,
             target_pages: None,
@@ -52,6 +84,8 @@ impl Default for LiteParseConfig {
             password: None,
             quiet: false,
             num_workers: default_num_workers(),
+            image_mode: ImageMode::Placeholder,
+            extract_links: true,
         }
     }
 }

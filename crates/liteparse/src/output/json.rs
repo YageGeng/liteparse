@@ -91,6 +91,12 @@ mod tests {
             page_height: 792.0,
             text: "txt".into(),
             text_items: items,
+            projected_lines: vec![],
+            regions: crate::types::Region::default(),
+            graphics: vec![],
+            figures: vec![],
+            struct_nodes: vec![],
+            image_refs: vec![],
         }
     }
 

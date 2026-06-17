@@ -7,6 +7,7 @@ from liteparse._liteparse import LiteParse as _NativeLiteParse
 from liteparse._liteparse import search_items as _native_search_items
 
 from .types import (
+    ExtractedImage,
     LiteParseConfig,
     ParsedPage,
     ParseError,
@@ -42,9 +43,19 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                 text_items=text_items,
             )
         )
+    images = [
+        ExtractedImage(
+            id=img.id,
+            page=img.page,
+            format=img.format,
+            bytes=img.bytes,
+        )
+        for img in getattr(native_result, "images", [])
+    ]
     return ParseResult(
         pages=pages,
         text=native_result.text,
+        images=images,
     )
 
 
@@ -76,6 +87,8 @@ class LiteParse:
         password: Optional[str] = None,
         quiet: Optional[bool] = None,
         num_workers: Optional[int] = None,
+        image_mode: Optional[str] = None,
+        extract_links: Optional[bool] = None,
     ):
         """
         Initialize LiteParse parser.
@@ -88,11 +101,13 @@ class LiteParse:
             max_pages: Maximum number of pages to parse
             target_pages: Specific pages to parse (e.g., "1-5,10,15-20")
             dpi: DPI for rendering (affects OCR quality)
-            output_format: Output format: "json" or "text" (default: "json")
+            output_format: Output format: "json", "text", or "markdown" (default: "json")
             preserve_very_small_text: Whether to preserve very small text
             password: Password for encrypted/protected documents
             quiet: Suppress progress output
             num_workers: Number of concurrent OCR workers (default: CPU cores - 1)
+            extract_links: Render hyperlink annotations as ``[text](url)`` in
+                markdown output (default: True). Set False for plain anchor text.
         """
         kwargs = {}
         if ocr_enabled is not None:
@@ -119,6 +134,10 @@ class LiteParse:
             kwargs["quiet"] = quiet
         if num_workers is not None:
             kwargs["num_workers"] = num_workers
+        if image_mode is not None:
+            kwargs["image_mode"] = image_mode
+        if extract_links is not None:
+            kwargs["extract_links"] = extract_links
 
         self._native = _NativeLiteParse(**kwargs)
 

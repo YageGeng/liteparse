@@ -130,4 +130,114 @@ impl Font {
         };
         if ok != 0 { Some(width) } else { None }
     }
+
+    /// Whether the font dictionary defines a /ToUnicode CMap. When false, the
+    /// unicode values PDFium reports for this font's chars are derived from
+    /// the encoding alone and may be garbage for custom/Identity encodings.
+    pub fn has_to_unicode(&self) -> bool {
+        unsafe { ffi!(FPDFFont_HasToUnicode(self.handle)) != 0 }
+    }
+
+    /// Get the font's /Encoding name ("WinAnsiEncoding", "Identity-H", ...),
+    /// the /BaseEncoding name when /Encoding is a dict, or "Custom" for
+    /// font-private encodings.
+    pub fn encoding(&self) -> Option<String> {
+        let len =
+            unsafe { ffi!(FPDFFont_GetEncoding(self.handle, std::ptr::null_mut(), 0)) } as usize;
+        if len == 0 {
+            return None;
+        }
+        let mut buf: Vec<u8> = vec![0; len];
+        let written = unsafe {
+            ffi!(FPDFFont_GetEncoding(
+                self.handle,
+                buf.as_mut_ptr() as *mut std::ffi::c_char,
+                len as u64 as _,
+            ))
+        } as usize;
+        if written == 0 {
+            return None;
+        }
+        let str_len = if buf[written - 1] == 0 {
+            written - 1
+        } else {
+            written
+        };
+        Some(String::from_utf8_lossy(&buf[..str_len]).into_owned())
+    }
+
+    /// Get the PostScript glyph name the font assigns to a raw char code
+    /// (from /Encoding /Differences, falling back to the embedded font
+    /// program's glyph name table). Resolve against the Adobe Glyph List to
+    /// recover unicode when /ToUnicode is missing.
+    pub fn char_glyph_name(&self, char_code: u32) -> Option<String> {
+        let len = unsafe {
+            ffi!(FPDFFont_GetCharGlyphName(
+                self.handle,
+                char_code,
+                std::ptr::null_mut(),
+                0
+            ))
+        } as usize;
+        if len == 0 {
+            return None;
+        }
+        let mut buf: Vec<u8> = vec![0; len];
+        let written = unsafe {
+            ffi!(FPDFFont_GetCharGlyphName(
+                self.handle,
+                char_code,
+                buf.as_mut_ptr() as *mut std::ffi::c_char,
+                len as u64 as _,
+            ))
+        } as usize;
+        if written == 0 {
+            return None;
+        }
+        let str_len = if buf[written - 1] == 0 {
+            written - 1
+        } else {
+            written
+        };
+        Some(String::from_utf8_lossy(&buf[..str_len]).into_owned())
+    }
+
+    /// Get the glyph index in the embedded font program for a raw char code.
+    /// Pair with glyph-path rendering for a per-glyph OCR fallback.
+    pub fn char_glyph_index(&self, char_code: u32) -> Option<u32> {
+        let idx = unsafe { ffi!(FPDFFont_GetCharGlyphIndex(self.handle, char_code)) };
+        if idx >= 0 { Some(idx as u32) } else { None }
+    }
+
+    /// Get the embedded font program bytes (decompressed FontFile/2/3 stream,
+    /// or the substitute font data for non-embedded fonts).
+    pub fn font_data(&self) -> Option<Vec<u8>> {
+        let mut size: usize = 0;
+        let ok = unsafe {
+            ffi!(FPDFFont_GetFontData(
+                self.handle,
+                std::ptr::null_mut(),
+                0,
+                &mut size
+            ))
+        };
+        if ok == 0 || size == 0 {
+            return None;
+        }
+        let mut buf: Vec<u8> = vec![0; size];
+        let mut written: usize = 0;
+        let ok = unsafe {
+            ffi!(FPDFFont_GetFontData(
+                self.handle,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut written
+            ))
+        };
+        if ok == 0 || written == 0 {
+            return None;
+        }
+        buf.truncate(written);
+        Some(buf)
+    }
 }
