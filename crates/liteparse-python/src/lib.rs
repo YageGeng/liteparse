@@ -29,10 +29,6 @@ struct PyTextItem {
     font_size: Option<f64>,
     #[pyo3(get)]
     confidence: Option<f64>,
-    #[pyo3(get)]
-    layout_block_id: Option<usize>,
-    #[pyo3(get)]
-    layout_label: Option<String>,
 }
 
 #[pymethods]
@@ -56,8 +52,6 @@ impl PyTextItem {
             font_name: self.font_name.clone(),
             font_size: self.font_size.map(|v| v as f32),
             confidence: self.confidence.map(|v| v as f32),
-            layout_block_id: self.layout_block_id,
-            layout_label: self.layout_label.clone(),
             ..Default::default()
         }
     }
@@ -72,8 +66,6 @@ impl PyTextItem {
             font_name: item.font_name,
             font_size: item.font_size.map(|v| v as f64),
             confidence: item.confidence.map(|v| v as f64).or(Some(1.0)),
-            layout_block_id: item.layout_block_id,
-            layout_label: item.layout_label,
         }
     }
 }

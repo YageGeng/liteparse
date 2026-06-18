@@ -151,10 +151,6 @@ pub struct JsTextItem {
     pub confidence: Option<f64>,
     /// Rotation in degrees (viewport space). Defaults to 0 when omitted.
     pub rotation: Option<f64>,
-    /// Page-local layout block id assigned after layout detection.
-    pub layout_block_id: Option<u32>,
-    /// Layout label assigned after layout detection.
-    pub layout_label: Option<String>,
 }
 
 impl JsTextItem {
@@ -169,8 +165,6 @@ impl JsTextItem {
             font_name: self.font_name.clone(),
             font_size: self.font_size.map(|v| v as f32),
             confidence: self.confidence.map(|v| v as f32),
-            layout_block_id: self.layout_block_id.map(|v| v as usize),
-            layout_label: self.layout_label.clone(),
             ..Default::default()
         }
     }
@@ -186,8 +180,6 @@ impl JsTextItem {
             font_name: item.font_name.clone(),
             font_size: item.font_size.map(|v| v as f64),
             confidence: item.confidence.map(|v| v as f64).or(Some(1.0)),
-            layout_block_id: item.layout_block_id.map(|v| v as u32),
-            layout_label: item.layout_label.clone(),
         }
     }
 }

@@ -103,7 +103,7 @@ fn dedupe_rules(blocks: &mut Vec<crate::markdown_layout::Block>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Anchor, ProjectedLine, Rect, TextItem};
+    use crate::types::{Anchor, LayoutBlock, ProjectedLine, Rect, TextItem};
 
     fn line(text: &str, x: f32, y: f32, h: f32, size: f32) -> ProjectedLine {
         ProjectedLine {
@@ -236,5 +236,115 @@ mod tests {
         let out = format_markdown(&[a, b], &[], ImageMode::Placeholder);
         assert!(out.contains("-----"));
         assert!(out.find("A page.").unwrap() < out.find("B page.").unwrap());
+    }
+
+    #[test]
+    fn layout_table_hint_recovers_table_split_across_regions() {
+        let mut lines = vec![
+            crate::markdown_layout::test_helpers::line_with_spans(
+                &[("Name", 50.0), ("Scores", 150.0)],
+                20.0,
+                10.0,
+            ),
+            crate::markdown_layout::test_helpers::line_with_spans(
+                &[("A", 50.0), ("1", 150.0), ("2", 250.0)],
+                35.0,
+                10.0,
+            ),
+            crate::markdown_layout::test_helpers::line_with_spans(
+                &[("B", 50.0), ("3", 150.0), ("4", 250.0)],
+                50.0,
+                10.0,
+            ),
+            crate::markdown_layout::test_helpers::line_with_spans(
+                &[("C", 50.0), ("5", 150.0), ("6", 250.0)],
+                65.0,
+                10.0,
+            ),
+        ];
+        for (idx, line) in lines.iter_mut().enumerate() {
+            line.region_path = vec![idx as u16];
+        }
+        let mut page = page_with(1, lines);
+        page.layout_blocks = vec![LayoutBlock {
+            id: 0,
+            label: "Table".into(),
+            confidence: 0.9,
+            x: 0.0,
+            y: 0.0,
+            width: 320.0,
+            height: 100.0,
+        }];
+
+        let out = format_markdown(&[page], &[], ImageMode::Placeholder);
+
+        assert!(out.contains("| Name | Scores |"));
+        assert!(out.contains("| A | 1 | 2 |"));
+    }
+
+    #[test]
+    /// Text layout hints merge projected lines into one markdown paragraph.
+    fn layout_text_hint_merges_lines_into_one_paragraph() {
+        let mut lines = vec![
+            line("First sentence.", 50.0, 80.0, 10.0, 10.0),
+            line("Second sentence guided by layout.", 52.0, 150.0, 10.0, 10.0),
+        ];
+        for (idx, line) in lines.iter_mut().enumerate() {
+            // Force an xy-cut split so this test covers cross-region stitching,
+            // not only the simpler in-region paragraph accumulator path.
+            line.region_path = vec![idx as u16];
+        }
+        let mut page = page_with(1, lines);
+        page.layout_blocks = vec![LayoutBlock {
+            id: 0,
+            label: "Text".into(),
+            confidence: 0.9,
+            x: 40.0,
+            y: 70.0,
+            width: 420.0,
+            height: 100.0,
+        }];
+
+        let out = format_markdown(&[page], &[], ImageMode::Placeholder);
+
+        assert!(out.contains("First sentence. Second sentence guided by layout."));
+        assert!(!out.contains("First sentence.\n\nSecond sentence guided by layout."));
+    }
+
+    #[test]
+    /// Separate Text layout hints keep markdown paragraphs split.
+    fn layout_text_hints_keep_different_blocks_as_separate_paragraphs() {
+        let mut page = page_with(
+            1,
+            vec![
+                line("First detected text block", 50.0, 80.0, 10.0, 10.0),
+                line("second detected text block", 50.0, 92.0, 10.0, 10.0),
+            ],
+        );
+        page.layout_blocks = vec![
+            LayoutBlock {
+                id: 0,
+                label: "Text".into(),
+                confidence: 0.9,
+                x: 40.0,
+                y: 74.0,
+                width: 420.0,
+                height: 14.0,
+            },
+            LayoutBlock {
+                id: 1,
+                label: "Text".into(),
+                confidence: 0.9,
+                x: 40.0,
+                y: 90.0,
+                width: 420.0,
+                height: 16.0,
+            },
+        ];
+
+        let out = format_markdown(&[page], &[], ImageMode::Placeholder);
+
+        assert!(out.contains("First detected text block\n\nsecond detected text block"));
+        assert!(!out.contains("First detected text block second detected text block"));
     }
 }

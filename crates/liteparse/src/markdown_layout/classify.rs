@@ -6,6 +6,7 @@ use super::headings::{
     is_caption_line, is_toc_title, looks_like_bold_heading, looks_like_numbered_bold_heading,
     outline_heading_level, page_is_toc, struct_heading_level,
 };
+use super::hints::MarkdownLayoutHints;
 use super::hr::detect_horizontal_rules;
 use super::inline::{
     append_inline_continuation, line_uniform_style, render_line_inline, render_list_item_text,
@@ -149,6 +150,7 @@ pub fn classify_page_with_filters(
     } else {
         &filtered_owned
     };
+    let hints = MarkdownLayoutHints::from_page(page);
 
     // Global ruled-table pass. `detect_ruled_tables` is otherwise called per
     // xy_cut leaf, but a ruled table whose rows scatter across several leaves
@@ -224,14 +226,26 @@ pub fn classify_page_with_filters(
         global_ruled_tables.push((top_y, run.block));
         global_ruled_consumed.extend(consumed);
     }
-    let global_ruled_owned: Option<Vec<ProjectedLine>> = if global_ruled_consumed.is_empty() {
+    let hinted_tables = hints.detect_table_interruptions(
+        lines,
+        &page.graphics,
+        page.page_width,
+        page.page_height,
+        &global_ruled_consumed,
+    );
+    let page_level_consumed: std::collections::HashSet<usize> = global_ruled_consumed
+        .iter()
+        .copied()
+        .chain(hinted_tables.consumed.iter().copied())
+        .collect();
+    let global_ruled_owned: Option<Vec<ProjectedLine>> = if page_level_consumed.is_empty() {
         None
     } else {
         Some(
             lines
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| !global_ruled_consumed.contains(i))
+                .filter(|(i, _)| !page_level_consumed.contains(i))
                 .map(|(_, l)| l.clone())
                 .collect(),
         )
@@ -306,14 +320,16 @@ pub fn classify_page_with_filters(
     for (y, block) in global_ruled_tables {
         all_interruptions.push((y, Interruption::Table(block)));
     }
+    for (y, block) in hinted_tables.tables {
+        all_interruptions.push((y, Interruption::Table(block)));
+    }
     all_interruptions.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-    // region_boundary_idx[k] = index into `blocks` where region k's first
-    // block lives. Used by `stitch_regions` to know where to test cross-leaf
-    // paragraph continuation. Stored alongside the region's last line so the
-    // stitcher can use the same `continues_paragraph` cross-region rule that
-    // governs intra-region merging — no second source of truth.
-    let mut region_boundaries: Vec<usize> = Vec::new();
+    // Region boundaries carry the block index plus adjacent source lines. The
+    // stitcher needs the line geometry to decide whether a layout Text block
+    // should override the default cross-leaf paragraph split.
+    let mut region_boundaries: Vec<RegionBoundary> = Vec::new();
+    let mut previous_region_last_line: Option<ProjectedLine> = None;
     let mut interrupt_cursor = 0usize;
     let mut blocks: Vec<Block> = Vec::new();
 
@@ -372,10 +388,18 @@ pub fn classify_page_with_filters(
             outline,
             toc_page,
             debug,
+            &hints,
             precomputed_tables,
         );
         if !region_blocks.is_empty() {
-            region_boundaries.push(region_start);
+            if let Some(previous_last_line) = previous_region_last_line.as_ref() {
+                region_boundaries.push(RegionBoundary {
+                    block_start: region_start,
+                    previous_last_line: previous_last_line.clone(),
+                    current_first_line: region_lines[0].clone(),
+                });
+            }
+            previous_region_last_line = region_lines.last().cloned();
             blocks.extend(region_blocks);
         }
     }
@@ -387,7 +411,18 @@ pub fn classify_page_with_filters(
         interrupt_cursor += 1;
     }
 
-    stitch_regions(blocks, &region_boundaries)
+    stitch_regions(blocks, &region_boundaries, &hints)
+}
+
+/// Source-line context for a block boundary between two classified xy-cut regions.
+#[derive(Debug, Clone)]
+struct RegionBoundary {
+    /// Index in the final block stream where the later region starts.
+    block_start: usize,
+    /// Last projected line from the previous non-empty region.
+    previous_last_line: ProjectedLine,
+    /// First projected line from the current non-empty region.
+    current_first_line: ProjectedLine,
 }
 
 /// Mutable per-line flow state threaded through `classify_region`: the active
@@ -472,6 +507,7 @@ fn classify_region(
     outline: &[OutlineTarget],
     toc_page: bool,
     debug: bool,
+    hints: &MarkdownLayoutHints,
     precomputed_tables: Option<Vec<super::tables::TableRun>>,
 ) -> Vec<Block> {
     let mut blocks: Vec<Block> = Vec::new();
@@ -621,12 +657,16 @@ fn classify_region(
         // excluded from `build_heading_map`, but their size can still coincide
         // with a map entry built from horizontal text. Suppress font-size
         // promotion for them so they don't surface as spurious headings.
-        let size_level =
-            if is_caption_line(text) || toc_suppress || is_rotated_line(line) || line.in_figure {
-                None
-            } else {
-                heading_level_for(heading_size_of(line), heading_map)
-            };
+        let size_level = if is_caption_line(text)
+            || toc_suppress
+            || is_rotated_line(line)
+            || line.in_figure
+            || hints.suppresses_heading(line)
+        {
+            None
+        } else {
+            heading_level_for(heading_size_of(line), heading_map)
+        };
         // Guard against height-jitter false headings: a line that flows from
         // the previous line (same paragraph) AND starts lowercase is a
         // mid-paragraph continuation, not a heading — even if its
@@ -815,6 +855,7 @@ fn classify_region(
             // headings in technical/legal/scientific PDFs silently emit as
             // ordered list items and lose all heading structure.
             if ordered
+                && !hints.suppresses_heading(line)
                 && !toc_suppress
                 && looks_like_numbered_bold_heading(
                     line,
@@ -888,7 +929,10 @@ fn classify_region(
             .map(|p| &p.last)
             .or(state.last_list_line.map(|i| &lines[i]));
         let next_for_gap = lines.get(idx);
-        if !toc_suppress && looks_like_bold_heading(line, prev_for_gap, next_for_gap) {
+        if !toc_suppress
+            && !hints.suppresses_heading(line)
+            && looks_like_bold_heading(line, prev_for_gap, next_for_gap)
+        {
             state.flush_paragraph(&mut blocks);
             state.reset_list();
             // Level: one deeper than the deepest size-based level we already
@@ -915,7 +959,16 @@ fn classify_region(
         }
 
         match state.paragraph.as_mut() {
-            Some(acc) if continues_paragraph(&acc.last, line) => {
+            Some(acc)
+                if !hints.separates_text_blocks(&acc.last, line)
+                    && (continues_paragraph(&acc.last, line)
+                        || hints.continues_text_block(&acc.last, line)) =>
+            {
+                // CONTEXT: A detector-provided Text block can represent one
+                // logical paragraph that the projection split by region or
+                // vertical gap. This only runs after heading/list/table/code
+                // classification has declined the line, so the hint is scoped
+                // to ordinary markdown paragraph assembly.
                 append_to_paragraph(acc, line);
             }
             _ => {
@@ -1056,6 +1109,11 @@ fn detect_code_language(lines: &[String]) -> Option<String> {
 ///   paragraph ends mid-sentence (no terminal punctuation) and the next
 ///   starts lowercase. Heals a column wrap losing its tail to a separate
 ///   block.
+/// - **Text layout hint**: when adjacent region-edge lines both sit inside
+///   the same detected Text region, merge their paragraph blocks even if the
+///   normal sentence-shape rule would split them. When they sit inside
+///   different detected Text regions, keep them split even if the normal
+///   heuristic would merge them.
 /// - **Hyphen splice**: previous paragraph ends `<letter>-` and next starts
 ///   ASCII-lowercase. Already handled in `render_blocks` for the adjacent
 ///   case, but doing it here too lets the merged block flow through the
@@ -1066,15 +1124,20 @@ fn detect_code_language(lines: &[String]) -> Option<String> {
 /// A bullet point split across columns is rare and a false merge is worse
 /// than a true split; a table split across leaves indicates a projection-side
 /// issue better fixed there than papered over here.
-fn stitch_regions(blocks: Vec<Block>, region_starts: &[usize]) -> Vec<Block> {
-    if region_starts.len() <= 1 {
+fn stitch_regions(
+    blocks: Vec<Block>,
+    region_boundaries: &[RegionBoundary],
+    hints: &MarkdownLayoutHints,
+) -> Vec<Block> {
+    if region_boundaries.is_empty() {
         return blocks;
     }
-    let boundary_set: std::collections::HashSet<usize> =
-        region_starts.iter().skip(1).copied().collect();
     let mut out: Vec<Block> = Vec::with_capacity(blocks.len());
     for (i, block) in blocks.into_iter().enumerate() {
-        if boundary_set.contains(&i)
+        let boundary = region_boundaries
+            .iter()
+            .find(|boundary| boundary.block_start == i);
+        if let Some(boundary) = boundary
             && let Some(prev) = out.last_mut()
             && let (
                 Block::Paragraph {
@@ -1093,28 +1156,36 @@ fn stitch_regions(blocks: Vec<Block>, region_starts: &[usize]) -> Vec<Block> {
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_lowercase());
-            // Hyphen-splice path: a mid-word soft hyphen break across the
-            // leaf boundary. Drop the hyphen, join with no separator.
-            if is_soft_hyphen_break(prev_text, cur_text) {
-                // Pop the trailing `-` (it may have whitespace after it from
-                // a previous trim, so re-trim).
-                while prev_text.ends_with(|c: char| c.is_whitespace()) {
-                    prev_text.pop();
+            let layout_separates = hints
+                .separates_text_blocks(&boundary.previous_last_line, &boundary.current_first_line);
+            if !layout_separates {
+                // Hyphen-splice path: a mid-word soft hyphen break across the
+                // leaf boundary. Drop the hyphen, join with no separator.
+                if is_soft_hyphen_break(prev_text, cur_text) {
+                    // Pop the trailing `-` (it may have whitespace after it from
+                    // a previous trim, so re-trim).
+                    while prev_text.ends_with(|c: char| c.is_whitespace()) {
+                        prev_text.pop();
+                    }
+                    prev_text.pop(); // the '-'
+                    prev_text.push_str(cur_text.trim_start());
+                    continue;
                 }
-                prev_text.pop(); // the '-'
-                prev_text.push_str(cur_text.trim_start());
-                continue;
-            }
-            let ends_open = !prev_trim.ends_with(|c: char| {
-                matches!(
-                    c,
-                    '.' | '!' | '?' | ':' | ';' | '”' | '"' | ')' | ']' | '。' | '』' | '」'
-                )
-            });
-            if ends_open && starts_lower {
-                prev_text.push(' ');
-                prev_text.push_str(cur_text.trim_start());
-                continue;
+                let layout_continues = hints.continues_text_block(
+                    &boundary.previous_last_line,
+                    &boundary.current_first_line,
+                );
+                let ends_open = !prev_trim.ends_with(|c: char| {
+                    matches!(
+                        c,
+                        '.' | '!' | '?' | ':' | ';' | '”' | '"' | ')' | ']' | '。' | '』' | '」'
+                    )
+                });
+                if layout_continues || (ends_open && starts_lower) {
+                    prev_text.push(' ');
+                    prev_text.push_str(cur_text.trim_start());
+                    continue;
+                }
             }
         }
         out.push(block);

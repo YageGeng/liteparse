@@ -162,10 +162,6 @@ struct JsTextItem<'a> {
     font_size: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     confidence: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    layout_block_id: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    layout_label: Option<&'a str>,
 }
 
 impl<'a> JsTextItem<'a> {
@@ -180,8 +176,6 @@ impl<'a> JsTextItem<'a> {
             font_name: item.font_name.as_deref(),
             font_size: item.font_size,
             confidence: item.confidence,
-            layout_block_id: item.layout_block_id,
-            layout_label: item.layout_label.as_deref(),
         }
     }
 }
@@ -196,12 +190,11 @@ struct JsLayoutBlock<'a> {
     y: f32,
     width: f32,
     height: f32,
-    text_items: Vec<JsTextItem<'a>>,
 }
 
 impl<'a> JsLayoutBlock<'a> {
-    /// Create a JS-facing layout block with its assigned text items.
-    fn from_layout_block(block: &'a LayoutBlock, text_items: &'a [TextItem]) -> Self {
+    /// Create a JS-facing layout block from a page-level layout hint.
+    fn from_layout_block(block: &'a LayoutBlock) -> Self {
         Self {
             id: block.id,
             label: &block.label,
@@ -210,11 +203,6 @@ impl<'a> JsLayoutBlock<'a> {
             y: block.y,
             width: block.width,
             height: block.height,
-            text_items: text_items
-                .iter()
-                .filter(|item| item.layout_block_id == Some(block.id))
-                .map(JsTextItem::from_text_item)
-                .collect(),
         }
     }
 }
@@ -418,7 +406,7 @@ impl LiteParse {
                 layout_blocks: p
                     .layout_blocks
                     .iter()
-                    .map(|block| JsLayoutBlock::from_layout_block(block, &p.text_items))
+                    .map(JsLayoutBlock::from_layout_block)
                     .collect(),
             })
             .collect();
@@ -462,10 +450,6 @@ struct JsSearchTextItem {
     font_size: Option<f32>,
     #[serde(default)]
     confidence: Option<f32>,
-    #[serde(default)]
-    layout_block_id: Option<usize>,
-    #[serde(default)]
-    layout_label: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -503,8 +487,6 @@ pub fn search_items(items: JsValue, options: JsValue) -> Result<JsValue, JsError
             font_name: i.font_name,
             font_size: i.font_size,
             confidence: i.confidence,
-            layout_block_id: i.layout_block_id,
-            layout_label: i.layout_label,
             ..Default::default()
         })
         .collect();

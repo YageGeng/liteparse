@@ -37,15 +37,6 @@ pub mod glyph_names;
     feature = "layout-yolo-webgpu"
 ))]
 #[doc(hidden)]
-/// Assigns layout blocks back onto text items without exposing YOLO internals.
-pub(crate) mod layout_merge;
-#[cfg(any(
-    feature = "layout-yolo",
-    feature = "layout-yolo-metal",
-    feature = "layout-yolo-vulkan",
-    feature = "layout-yolo-webgpu"
-))]
-#[doc(hidden)]
 /// Isolates YOLO rendering and inference behind the generic layout flag.
 pub(crate) mod layout_yolo;
 #[doc(hidden)]

@@ -47,8 +47,6 @@ export interface NativeTextItem {
   fontSize?: number;
   confidence?: number;
   rotation?: number;
-  layoutBlockId?: number;
-  layoutLabel?: string;
 }
 
 export interface NativeGraphic {

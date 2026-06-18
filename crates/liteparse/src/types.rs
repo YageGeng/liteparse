@@ -67,12 +67,6 @@ pub struct TextItem {
     /// markdown emitter to wrap the text in `~~…~~`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub strike: bool,
-    /// Page-local layout block id assigned after layout detection.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub layout_block_id: Option<usize>,
-    /// Layout label assigned after layout detection.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub layout_label: Option<String>,
 }
 
 /// A detected document layout block on a page.

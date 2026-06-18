@@ -53,10 +53,6 @@ export interface JsTextItem {
   confidence?: number
   /** Rotation in degrees (viewport space). Defaults to 0 when omitted. */
   rotation?: number
-  /** Page-local layout block id assigned after layout detection. */
-  layoutBlockId?: number
-  /** Layout label assigned after layout detection. */
-  layoutLabel?: string
 }
 /**
  * A vector-graphic primitive supplied by an external extractor. `kind` selects

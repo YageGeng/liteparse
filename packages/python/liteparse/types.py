@@ -18,8 +18,6 @@ class TextItem:
     font_name: Optional[str] = None
     font_size: Optional[float] = None
     confidence: Optional[float] = None
-    layout_block_id: Optional[int] = None
-    layout_label: Optional[str] = None
 
 
 @dataclass

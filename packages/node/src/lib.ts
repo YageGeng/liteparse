@@ -49,10 +49,6 @@ export interface TextItem {
   confidence?: number;
   /** Rotation in degrees (viewport space). Defaults to 0 when omitted. */
   rotation?: number;
-  /** Page-local layout block id assigned after layout detection. */
-  layoutBlockId?: number;
-  /** Layout label assigned after layout detection. */
-  layoutLabel?: string;
 }
 
 export interface LayoutBlock {
@@ -283,8 +279,6 @@ function toTextItem(item: NativeTextItem): TextItem {
     fontName: item.fontName,
     fontSize: item.fontSize,
     confidence: item.confidence,
-    layoutBlockId: item.layoutBlockId,
-    layoutLabel: item.layoutLabel,
   };
 }
 

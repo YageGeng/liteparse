@@ -32,8 +32,6 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                 font_name=item.font_name,
                 font_size=item.font_size,
                 confidence=item.confidence,
-                layout_block_id=getattr(item, "layout_block_id", None),
-                layout_label=getattr(item, "layout_label", None),
             )
             for item in native_page.text_items
         ]

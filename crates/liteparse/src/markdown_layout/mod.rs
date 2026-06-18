@@ -11,6 +11,7 @@ mod classify;
 mod cross_region;
 mod flags;
 mod headings;
+mod hints;
 mod hr;
 mod inline;
 mod lists;

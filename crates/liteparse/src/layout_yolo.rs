@@ -1,7 +1,6 @@
 use crate::config::LiteParseConfig;
 use crate::error::LiteParseError;
 use crate::extract;
-use crate::layout_merge;
 use crate::types::{LayoutBlock, ParsedPage, PdfInput};
 use liteparse_layout::{
     LayoutDetection, PageImage, YoloLayoutDetector, YoloLayoutOptions,
@@ -181,11 +180,9 @@ pub(crate) async fn detect_layout_blocks_for_pages(
         #[cfg(not(all(target_arch = "wasm32", feature = "layout-yolo-webgpu")))]
         let blocks = detector.detect_rendered(rendered, config.dpi)?;
 
-        // CONTEXT: Keep the raw detected blocks on the page, then annotate
-        // text items with compact block ids for consumers that need grouping.
+        // CONTEXT: Keep detected blocks as page-level hints. Markdown consumes
+        // them through generic layout hints rather than mutating text items.
         page.layout_blocks = blocks;
-        layout_merge::assign_text_items_to_layout_blocks(&mut page.text_items, &page.layout_blocks);
-        layout_merge::compact_layout_blocks(&mut page.layout_blocks, &mut page.text_items);
     }
 
     Ok(())
