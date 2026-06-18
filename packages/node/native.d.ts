@@ -39,6 +39,8 @@ export interface JsLiteParseConfig {
    * (default true). Set false for plain anchor text.
    */
   extractLinks?: boolean
+  /** Enable document layout detection. */
+  layoutEnabled?: boolean
 }
 export interface JsTextItem {
   text: string
@@ -51,6 +53,10 @@ export interface JsTextItem {
   confidence?: number
   /** Rotation in degrees (viewport space). Defaults to 0 when omitted. */
   rotation?: number
+  /** Page-local layout block id assigned after layout detection. */
+  layoutBlockId?: number
+  /** Layout label assigned after layout detection. */
+  layoutLabel?: string
 }
 /**
  * A vector-graphic primitive supplied by an external extractor. `kind` selects
@@ -101,6 +107,17 @@ export interface JsParsedPage {
   height: number
   text: string
   textItems: Array<JsTextItem>
+  layoutBlocks: Array<JsLayoutBlock>
+}
+/** A detected document layout block on a parsed page. */
+export interface JsLayoutBlock {
+  id: number
+  label: string
+  confidence: number
+  x: number
+  y: number
+  width: number
+  height: number
 }
 export interface JsParseResult {
   pages: Array<JsParsedPage>

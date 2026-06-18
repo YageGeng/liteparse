@@ -1,4 +1,4 @@
-use crate::types::ParsedPage;
+use crate::types::{LayoutBlock, ParsedPage};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -16,6 +16,25 @@ pub(crate) struct JsonTextItem {
     pub confidence: Option<f32>,
 }
 
+/// JSON representation of one detected layout block.
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonLayoutBlock {
+    /// Stable page-local block id.
+    pub id: usize,
+    /// Public layout class label.
+    pub label: String,
+    /// Model confidence score for the block.
+    pub confidence: f32,
+    /// Left position in page coordinates.
+    pub x: f32,
+    /// Top position in page coordinates.
+    pub y: f32,
+    /// Block width in page coordinates.
+    pub width: f32,
+    /// Block height in page coordinates.
+    pub height: f32,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct JsonPage {
     pub page: usize,
@@ -23,6 +42,8 @@ pub(crate) struct JsonPage {
     pub height: f32,
     pub text: String,
     pub text_items: Vec<JsonTextItem>,
+    /// Layout blocks detected on this page, kept separate from text items.
+    pub layout_blocks: Vec<JsonLayoutBlock>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,8 +75,30 @@ pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
                         confidence: item.confidence.or(Some(1.0)),
                     })
                     .collect(),
+                // CONTEXT: Keep layout blocks as a sibling array so existing
+                // JSON consumers can continue reading `text_items` unchanged.
+                layout_blocks: page
+                    .layout_blocks
+                    .iter()
+                    .map(JsonLayoutBlock::from_layout_block)
+                    .collect(),
             })
             .collect(),
+    }
+}
+
+impl JsonLayoutBlock {
+    /// Create the JSON representation for a detected layout block.
+    fn from_layout_block(block: &LayoutBlock) -> Self {
+        Self {
+            id: block.id,
+            label: block.label.clone(),
+            confidence: block.confidence,
+            x: block.x,
+            y: block.y,
+            width: block.width,
+            height: block.height,
+        }
     }
 }
 
@@ -68,8 +111,9 @@ pub fn format_json(pages: &[ParsedPage]) -> Result<String, serde_json::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ParsedPage, TextItem};
+    use crate::types::{LayoutBlock, ParsedPage, TextItem};
 
+    // Build a compact text item for JSON output tests.
     fn item(text: &str, conf: Option<f32>) -> TextItem {
         TextItem {
             text: text.into(),
@@ -84,6 +128,7 @@ mod tests {
         }
     }
 
+    // Build a parsed page with no layout blocks by default.
     fn page(items: Vec<TextItem>) -> ParsedPage {
         ParsedPage {
             page_number: 1,
@@ -91,6 +136,7 @@ mod tests {
             page_height: 792.0,
             text: "txt".into(),
             text_items: items,
+            layout_blocks: vec![],
             projected_lines: vec![],
             regions: crate::types::Region::default(),
             graphics: vec![],
@@ -100,6 +146,7 @@ mod tests {
         }
     }
 
+    // Verifies native text gets the historical JSON confidence default.
     #[test]
     fn test_build_json_native_text_defaults_confidence_to_one() {
         let j = build_json(&[page(vec![item("hi", None)])]);
@@ -107,14 +154,17 @@ mod tests {
         assert_eq!(j.pages[0].page, 1);
         assert_eq!(j.pages[0].text_items[0].confidence, Some(1.0));
         assert_eq!(j.pages[0].text_items[0].font_name.as_deref(), Some("Helv"));
+        assert!(j.pages[0].layout_blocks.is_empty());
     }
 
+    // Verifies OCR confidence is preserved instead of replaced by the default.
     #[test]
     fn test_build_json_preserves_ocr_confidence() {
         let j = build_json(&[page(vec![item("hi", Some(0.42))])]);
         assert_eq!(j.pages[0].text_items[0].confidence, Some(0.42));
     }
 
+    // Verifies JSON formatting remains pretty-printed.
     #[test]
     fn test_format_json_pretty() {
         let s = format_json(&[page(vec![item("hi", None)])]).unwrap();
@@ -123,9 +173,30 @@ mod tests {
         assert!(s.contains("\"page\": 1"));
     }
 
+    // Verifies empty page input serializes to an empty page array.
     #[test]
     fn test_build_json_empty() {
         let j = build_json(&[]);
         assert!(j.pages.is_empty());
+    }
+
+    // Verifies layout blocks are additive and do not replace text items.
+    #[test]
+    fn test_build_json_keeps_text_items_when_layout_blocks_exist() {
+        let mut page = page(vec![item("hi", None)]);
+        page.layout_blocks = vec![LayoutBlock {
+            id: 0,
+            label: "Text".into(),
+            confidence: 0.9,
+            x: 1.0,
+            y: 2.0,
+            width: 3.0,
+            height: 4.0,
+        }];
+
+        let j = build_json(&[page]);
+
+        assert_eq!(j.pages[0].text_items[0].text, "hi");
+        assert_eq!(j.pages[0].layout_blocks[0].label, "Text");
     }
 }

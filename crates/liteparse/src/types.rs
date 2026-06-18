@@ -67,6 +67,31 @@ pub struct TextItem {
     /// markdown emitter to wrap the text in `~~…~~`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub strike: bool,
+    /// Page-local layout block id assigned after layout detection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout_block_id: Option<usize>,
+    /// Layout label assigned after layout detection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout_label: Option<String>,
+}
+
+/// A detected document layout block on a page.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LayoutBlock {
+    /// Stable page-local id assigned after reading-order sorting.
+    pub id: usize,
+    /// Layout class label, e.g. "Text", "Table", or "Title".
+    pub label: String,
+    /// Detection confidence score (0.0-1.0).
+    pub confidence: f32,
+    /// Left position in viewport-space coordinates.
+    pub x: f32,
+    /// Top position in viewport-space coordinates.
+    pub y: f32,
+    /// Block width in viewport-space coordinates.
+    pub width: f32,
+    /// Block height in viewport-space coordinates.
+    pub height: f32,
 }
 
 #[doc(hidden)]
@@ -128,6 +153,8 @@ pub struct ParsedPage {
     pub page_height: f32,
     pub text: String,
     pub text_items: Vec<TextItem>,
+    /// Detected layout blocks ordered by page-local reading order.
+    pub layout_blocks: Vec<LayoutBlock>,
     /// Per-line structural metadata used by the markdown emitter. Not part of
     /// the JSON/text outputs (consumed internally) so it is `#[serde(skip)]`.
     #[serde(skip)]

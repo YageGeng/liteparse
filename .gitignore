@@ -69,6 +69,12 @@ ltt/
 # OCR data files
 *.traineddata
 
+# Local YOLO layout model exports
+models/yolo26*_doc_layout.pt
+models/yolo26*_doc_layout.onnx
+models/yolo26*_doc_layout.bpk
+crates/liteparse-layout/src/model/yolo26.rs
+
 # Docs
 .docs-preview/
 docs/src/content/docs/liteparse/api.md

@@ -1,0 +1,214 @@
+use burn_onnx::{LoadStrategy, ModelGen};
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+const ONNX_MODEL: &str = "../../models/yolo26n_doc_layout.onnx";
+/// Relative output directory used by Burn ONNX code generation.
+const GENERATED_DIR: &str = "model";
+/// File name emitted by Burn ONNX code generation.
+const GENERATED_MODEL_FILE: &str = "yolo26n_doc_layout.rs";
+
+/// Generate the embedded Burn model from the exported ONNX file.
+fn main() {
+    println!("cargo:rerun-if-changed={ONNX_MODEL}");
+
+    let onnx_path = PathBuf::from(ONNX_MODEL);
+    if !onnx_path.exists() {
+        panic!(
+            "YOLO layout ONNX model not found at {}; run `uv run python scripts/export-yolo-layout-onnx.py --variant n` first",
+            onnx_path.display()
+        );
+    }
+
+    generate_burn_model(&onnx_path);
+}
+
+/// Run Burn ONNX codegen, then patch generated source for LiteParse backends.
+fn generate_burn_model(onnx_path: &Path) {
+    let onnx_path = onnx_path
+        .canonicalize()
+        .unwrap_or_else(|error| panic!("canonicalize ONNX path {}: {error}", onnx_path.display()));
+
+    ModelGen::new()
+        .input(onnx_path.to_str().expect("ONNX path should be valid UTF-8"))
+        .out_dir(GENERATED_DIR)
+        .load_strategy(LoadStrategy::Embedded)
+        .run_from_script();
+
+    // CONTEXT: Burn codegen is close to usable but still needs small import
+    // and dtype patches for the backend combinations this crate supports.
+    let generated_path = generated_model_path();
+    let source = fs::read_to_string(&generated_path).unwrap_or_else(|error| {
+        panic!(
+            "read generated burn model {}: {error}",
+            generated_path.display()
+        )
+    });
+    fs::write(&generated_path, patch_generated_model(source))
+        .expect("write patched generated model source");
+}
+
+/// Return the generated model source path inside Cargo's build output.
+fn generated_model_path() -> PathBuf {
+    PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by Cargo"))
+        .join(GENERATED_DIR)
+        .join(GENERATED_MODEL_FILE)
+}
+
+/// Apply deterministic source patches to the Burn-generated model module.
+fn patch_generated_model(mut source: String) -> String {
+    source = replace_generated_header(source);
+
+    for (from, to) in [
+        (
+            "use burn::nn::PaddingConfig2d;",
+            "use burn_nn::PaddingConfig2d;",
+        ),
+        ("use burn::nn::conv::Conv2d;", "use burn_nn::conv::Conv2d;"),
+        (
+            "use burn::nn::conv::Conv2dConfig;",
+            "use burn_nn::conv::Conv2dConfig;",
+        ),
+        (
+            "use burn::nn::pool::MaxPool2d;",
+            "use burn_nn::pool::MaxPool2d;",
+        ),
+        (
+            "use burn::nn::pool::MaxPool2dConfig;",
+            "use burn_nn::pool::MaxPool2dConfig;",
+        ),
+        ("burn::nn::interpolate::", "burn_nn::interpolate::"),
+        (
+            "__topk_indices_raw.cast(burn::tensor::DType::I64)",
+            "__topk_indices_raw.cast(yolo_index_dtype())",
+        ),
+    ] {
+        source = source.replace(from, to);
+    }
+
+    source = insert_index_helpers(source);
+    source = replace_class_count_initializer(source);
+    replace_wasm_webgpu_topk_postprocess(source)
+}
+
+/// Replace the absolute generated header with a stable workspace-relative one.
+fn replace_generated_header(source: String) -> String {
+    const HEADER: &str =
+        "// Generated from ONNX \"../../models/yolo26n_doc_layout.onnx\" by burn-onnx";
+
+    let Some(line_end) = source.find('\n') else {
+        return source;
+    };
+    if !source.starts_with("// Generated from ONNX ") {
+        return source;
+    }
+
+    format!("{HEADER}{}", &source[line_end..])
+}
+
+/// Inject backend-specific helpers used by generated tensor indexing code.
+fn insert_index_helpers(source: String) -> String {
+    const MARKER: &str = "use burn_store::ModuleSnapshot;\n";
+    if source.contains("fn yolo_index_dtype()") {
+        return source;
+    }
+
+    let helpers = r#"
+#[cfg(all(
+    feature = "backend-ndarray",
+    not(any(
+        feature = "backend-metal",
+        feature = "backend-vulkan",
+        feature = "backend-webgpu"
+    ))
+))]
+/// Return the integer dtype required by ndarray tensor indexing.
+fn yolo_index_dtype() -> burn::tensor::DType {
+    burn::tensor::DType::I64
+}
+
+#[cfg(any(feature = "backend-metal", feature = "backend-vulkan", feature = "backend-webgpu"))]
+/// Return the integer dtype required by WGPU tensor indexing.
+fn yolo_index_dtype() -> burn::tensor::DType {
+    burn::tensor::DType::I32
+}
+
+#[cfg(all(
+    feature = "backend-ndarray",
+    not(any(
+        feature = "backend-metal",
+        feature = "backend-vulkan",
+        feature = "backend-webgpu"
+    ))
+))]
+/// Create the class-count tensor using the ndarray integer dtype.
+fn class_count_tensor<B: Backend>(device: &B::Device) -> Tensor<B, 1, Int> {
+    Tensor::<B, 1, Int>::from_data(
+        burn::tensor::TensorData::from([11i64]),
+        (device, burn::tensor::DType::I64),
+    )
+}
+
+#[cfg(any(feature = "backend-metal", feature = "backend-vulkan", feature = "backend-webgpu"))]
+/// Create the class-count tensor using the WGPU integer dtype.
+fn class_count_tensor<B: Backend>(device: &B::Device) -> Tensor<B, 1, Int> {
+    Tensor::<B, 1, Int>::from_data(
+        burn::tensor::TensorData::from([11i32]),
+        (device, burn::tensor::DType::I32),
+    )
+}
+"#;
+
+    source.replacen(MARKER, &format!("{MARKER}{helpers}"), 1)
+}
+
+/// Replace a generated class-count closure with a backend-specific tensor.
+fn replace_class_count_initializer(mut source: String) -> String {
+    let Some(constant_pos) = source.find("let constant227:") else {
+        return source;
+    };
+    let Some(relative_start) = source[constant_pos..].find("move |device, _require_grad|") else {
+        return source;
+    };
+    let start = constant_pos + relative_start;
+    let Some(relative_end) = source[start..].find("\n            device.clone(),") else {
+        return source;
+    };
+    let end = start + relative_end;
+    source.replace_range(
+        start..end,
+        "move |device, _require_grad| class_count_tensor::<B>(device),",
+    );
+    source
+}
+
+/// Return raw candidates before Burn's TopK nodes on browser WebGPU builds.
+fn replace_wasm_webgpu_topk_postprocess(mut source: String) -> String {
+    let Some(start) = source
+        .find("        let split_tensors = transpose5_out1.split_with_sizes([4, 11].into(), 2);")
+    else {
+        return source;
+    };
+    let Some(relative_end) = source[start..].find("        concat24_out1\n    }\n}") else {
+        return source;
+    };
+    let end = start + relative_end + "        concat24_out1\n".len();
+    let original = source[start..end].to_owned();
+    // CONTEXT: The native generated path returns processed top-k rows. Browser
+    // WebGPU cannot execute that generated TopK reliably yet, so model.rs
+    // decodes raw rows for that one target instead.
+    let replacement = format!(
+        r#"        #[cfg(all(target_family = "wasm", feature = "backend-webgpu"))]
+        {{
+            // CONTEXT: Burn WebGPU cannot execute generated TopK on wasm yet.
+            transpose5_out1
+        }}
+        #[cfg(not(all(target_family = "wasm", feature = "backend-webgpu")))]
+        {{
+{original}        }}
+"#
+    );
+    source.replace_range(start..end, &replacement);
+    source
+}

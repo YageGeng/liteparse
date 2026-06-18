@@ -2,26 +2,35 @@
 name = "liteparse-wasm"
 version = "2.1.0"
 edition.workspace = true
-license.workspace = true
-repository.workspace = true
 description = "LiteParse PDF parser — WebAssembly bindings for the browser"
+repository.workspace = true
+license.workspace = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O3"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-liteparse = { path = "../liteparse", default-features = false }
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
+console_error_panic_hook = { version = "0.1", optional = true }
 js-sys = "0.3"
+liteparse = { path = "../liteparse", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde-wasm-bindgen = "0.6"
-console_error_panic_hook = { version = "0.1", optional = true }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = {
+  version = "0.4.2",
+  default-features = false,
+  features = ["wasm_js"]
+}
 
 [features]
 default = ["panic_hook"]
+layout-yolo = ["liteparse/layout-yolo"]
+layout-yolo-webgpu = ["liteparse/layout-yolo-webgpu"]
 panic_hook = ["dep:console_error_panic_hook"]
-
-[package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O3"]

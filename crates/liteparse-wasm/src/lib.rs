@@ -18,7 +18,7 @@ use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
 use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult};
 use liteparse::parser::LiteParse as CoreLiteParse;
 use liteparse::search;
-use liteparse::types::PdfInput;
+use liteparse::types::{LayoutBlock, PdfInput, TextItem};
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -50,6 +50,7 @@ struct JsLiteParseConfig {
     preserve_very_small_text: Option<bool>,
     password: Option<String>,
     quiet: Option<bool>,
+    layout_enabled: Option<bool>,
 }
 
 impl JsLiteParseConfig {
@@ -108,6 +109,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.quiet {
             cfg.quiet = v;
         }
+        if let Some(v) = self.layout_enabled {
+            cfg.layout_enabled = v;
+        }
         cfg.num_workers = 1;
         Ok(cfg)
     }
@@ -135,6 +139,7 @@ impl JsLiteParseConfig {
             preserve_very_small_text: Some(cfg.preserve_very_small_text),
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),
+            layout_enabled: Some(cfg.layout_enabled),
         }
     }
 }
@@ -157,6 +162,61 @@ struct JsTextItem<'a> {
     font_size: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     confidence: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layout_block_id: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layout_label: Option<&'a str>,
+}
+
+impl<'a> JsTextItem<'a> {
+    /// Create a JS-facing text item from a parsed text item.
+    fn from_text_item(item: &'a TextItem) -> Self {
+        Self {
+            text: &item.text,
+            x: item.x,
+            y: item.y,
+            width: item.width,
+            height: item.height,
+            font_name: item.font_name.as_deref(),
+            font_size: item.font_size,
+            confidence: item.confidence,
+            layout_block_id: item.layout_block_id,
+            layout_label: item.layout_label.as_deref(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsLayoutBlock<'a> {
+    id: usize,
+    label: &'a str,
+    confidence: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    text_items: Vec<JsTextItem<'a>>,
+}
+
+impl<'a> JsLayoutBlock<'a> {
+    /// Create a JS-facing layout block with its assigned text items.
+    fn from_layout_block(block: &'a LayoutBlock, text_items: &'a [TextItem]) -> Self {
+        Self {
+            id: block.id,
+            label: &block.label,
+            confidence: block.confidence,
+            x: block.x,
+            y: block.y,
+            width: block.width,
+            height: block.height,
+            text_items: text_items
+                .iter()
+                .filter(|item| item.layout_block_id == Some(block.id))
+                .map(JsTextItem::from_text_item)
+                .collect(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -167,6 +227,7 @@ struct JsParsedPage<'a> {
     height: f32,
     text: &'a str,
     text_items: Vec<JsTextItem<'a>>,
+    layout_blocks: Vec<JsLayoutBlock<'a>>,
 }
 
 #[derive(Serialize)]
@@ -352,16 +413,12 @@ impl LiteParse {
                 text_items: p
                     .text_items
                     .iter()
-                    .map(|i| JsTextItem {
-                        text: &i.text,
-                        x: i.x,
-                        y: i.y,
-                        width: i.width,
-                        height: i.height,
-                        font_name: i.font_name.as_deref(),
-                        font_size: i.font_size,
-                        confidence: i.confidence,
-                    })
+                    .map(JsTextItem::from_text_item)
+                    .collect(),
+                layout_blocks: p
+                    .layout_blocks
+                    .iter()
+                    .map(|block| JsLayoutBlock::from_layout_block(block, &p.text_items))
                     .collect(),
             })
             .collect();
@@ -405,6 +462,10 @@ struct JsSearchTextItem {
     font_size: Option<f32>,
     #[serde(default)]
     confidence: Option<f32>,
+    #[serde(default)]
+    layout_block_id: Option<usize>,
+    #[serde(default)]
+    layout_label: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -442,6 +503,8 @@ pub fn search_items(items: JsValue, options: JsValue) -> Result<JsValue, JsError
             font_name: i.font_name,
             font_size: i.font_size,
             confidence: i.confidence,
+            layout_block_id: i.layout_block_id,
+            layout_label: i.layout_label,
             ..Default::default()
         })
         .collect();
@@ -452,19 +515,7 @@ pub fn search_items(items: JsValue, options: JsValue) -> Result<JsValue, JsError
     };
 
     let results = search::search_items(&rust_items, &options);
-    let js_results: Vec<JsTextItem<'_>> = results
-        .iter()
-        .map(|i| JsTextItem {
-            text: &i.text,
-            x: i.x,
-            y: i.y,
-            width: i.width,
-            height: i.height,
-            font_name: i.font_name.as_deref(),
-            font_size: i.font_size,
-            confidence: i.confidence,
-        })
-        .collect();
+    let js_results: Vec<JsTextItem<'_>> = results.iter().map(JsTextItem::from_text_item).collect();
 
     serde_wasm_bindgen::to_value(&js_results)
         .map_err(|e| JsError::new(&format!("serialize results failed: {}", e)))

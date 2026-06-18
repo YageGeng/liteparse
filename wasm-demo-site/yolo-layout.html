@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LiteParse - YOLO Layout Preview</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      :root {
+        --black: #000;
+        --paper: #fff;
+        --surface: #f6f7f8;
+        --line: #d9dee5;
+        --muted: #68707d;
+        --blue: #2563eb;
+        --cyan: #0891b2;
+        --pink: #db2777;
+        --orange: #ea580c;
+        --green: #16a34a;
+        --red: #dc2626;
+        --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --font-mono: "IBM Plex Mono", monospace;
+      }
+
+      body {
+        min-height: 100vh;
+        background: var(--surface);
+        color: var(--black);
+        font-family: var(--font-sans);
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        min-height: 64px;
+        padding: 0 1.5rem;
+        background: var(--black);
+        color: var(--paper);
+      }
+
+      header h1 {
+        font-family: var(--font-mono);
+        font-size: 1rem;
+        font-weight: 500;
+      }
+
+      header a {
+        color: #a7c7ff;
+        font-family: var(--font-mono);
+        font-size: 0.8rem;
+        margin-left: auto;
+        text-decoration: none;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+        gap: 1.25rem;
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 1.25rem;
+      }
+
+      .panel {
+        background: var(--paper);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+
+      .sidebar {
+        align-self: start;
+        overflow: hidden;
+      }
+
+      .section {
+        padding: 1rem;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .section:last-child {
+        border-bottom: 0;
+      }
+
+      h2,
+      h3 {
+        font-size: 0.95rem;
+        font-weight: 650;
+        margin-bottom: 0.75rem;
+      }
+
+      .drop-zone {
+        position: relative;
+        display: grid;
+        place-items: center;
+        min-height: 148px;
+        border: 2px dashed var(--line);
+        border-radius: 8px;
+        background: #fbfcfd;
+        cursor: pointer;
+        text-align: center;
+      }
+
+      .drop-zone.dragover {
+        border-color: var(--blue);
+        background: #eff6ff;
+      }
+
+      .drop-zone input {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        cursor: pointer;
+      }
+
+      .drop-zone strong {
+        display: block;
+        font-size: 0.95rem;
+      }
+
+      .drop-zone span {
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+
+      .status {
+        min-height: 1.3rem;
+        margin-top: 0.8rem;
+        color: var(--muted);
+        font-family: var(--font-mono);
+        font-size: 0.78rem;
+      }
+
+      .status.success {
+        color: var(--green);
+      }
+
+      .status.error {
+        color: var(--red);
+      }
+
+      .control-row {
+        display: grid;
+        gap: 0.4rem;
+        margin-bottom: 0.75rem;
+      }
+
+      label {
+        color: var(--muted);
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+      }
+
+      select,
+      button {
+        min-height: 34px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--paper);
+        color: var(--black);
+        font: 0.82rem var(--font-mono);
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      button:hover {
+        background: #f1f5f9;
+      }
+
+      .stats {
+        display: grid;
+        gap: 0.5rem;
+        color: var(--muted);
+        font-family: var(--font-mono);
+        font-size: 0.76rem;
+      }
+
+      .stats strong {
+        color: var(--black);
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+      }
+
+      .legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        color: var(--muted);
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+      }
+
+      .swatch {
+        width: 0.75rem;
+        height: 0.75rem;
+        border-radius: 2px;
+        background: var(--blue);
+      }
+
+      .workspace {
+        min-height: calc(100vh - 104px);
+        padding: 1rem;
+        overflow: auto;
+      }
+
+      .page-shell {
+        display: grid;
+        justify-items: center;
+        min-height: 460px;
+      }
+
+      .page {
+        position: relative;
+        width: min(100%, 820px);
+        background: var(--paper);
+        border: 1px solid #cbd5e1;
+        box-shadow: 0 16px 40px rgb(15 23 42 / 10%);
+        overflow: hidden;
+      }
+
+      .page.empty {
+        display: grid;
+        place-items: center;
+        min-height: 420px;
+        color: var(--muted);
+        font-family: var(--font-mono);
+        font-size: 0.82rem;
+      }
+
+      .block {
+        position: absolute;
+        border: 2px solid currentColor;
+        background: color-mix(in srgb, currentColor 12%, transparent);
+        overflow: hidden;
+      }
+
+      .block-label {
+        position: absolute;
+        left: -2px;
+        top: -24px;
+        max-width: calc(100% + 4px);
+        min-height: 22px;
+        padding: 2px 5px;
+        background: currentColor;
+        color: var(--paper);
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+        line-height: 18px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .block-text {
+        padding: 0.35rem;
+        color: #111827;
+        font-size: clamp(0.62rem, 1.5vw, 0.78rem);
+        line-height: 1.25;
+        opacity: 0.78;
+      }
+
+      .json {
+        max-height: 320px;
+        overflow: auto;
+        padding: 0.85rem;
+        background: #101214;
+        color: #d6dee8;
+        border-radius: 6px;
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        line-height: 1.45;
+        white-space: pre;
+      }
+
+      @media (max-width: 860px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+
+        .workspace {
+          min-height: 420px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>LiteParse YOLO Layout Preview</h1>
+      <a href="./index.html">Basic demo</a>
+    </header>
+
+    <main>
+      <aside class="panel sidebar">
+        <section class="section">
+          <h2>Input</h2>
+          <div class="drop-zone" id="drop-zone">
+            <input type="file" id="pdf-input" accept=".pdf" />
+            <div>
+              <strong>Drop a PDF</strong>
+              <span>or click to choose one</span>
+            </div>
+          </div>
+          <div class="status" id="status">Loading WASM module...</div>
+        </section>
+
+        <section class="section">
+          <h3>Page</h3>
+          <div class="control-row">
+            <label for="page-select">Rendered page</label>
+            <select id="page-select" disabled></select>
+          </div>
+          <button id="copy-json" disabled>Copy JSON</button>
+        </section>
+
+        <section class="section">
+          <h3>Stats</h3>
+          <div class="stats" id="stats">
+            <span><strong>0</strong> pages</span>
+            <span><strong>0</strong> layout blocks</span>
+          </div>
+        </section>
+
+        <section class="section">
+          <h3>Labels</h3>
+          <div class="legend" id="legend"></div>
+        </section>
+
+        <section class="section">
+          <h3>JSON</h3>
+          <pre class="json" id="json-output">{}</pre>
+        </section>
+      </aside>
+
+      <section class="panel workspace">
+        <div class="page-shell" id="page-shell">
+          <div class="page empty">Upload a PDF to preview layout blocks.</div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module">
+      const statusEl = document.getElementById("status");
+      const dropZone = document.getElementById("drop-zone");
+      const fileInput = document.getElementById("pdf-input");
+      const pageSelect = document.getElementById("page-select");
+      const pageShell = document.getElementById("page-shell");
+      const statsEl = document.getElementById("stats");
+      const legendEl = document.getElementById("legend");
+      const jsonOutput = document.getElementById("json-output");
+      const copyJson = document.getElementById("copy-json");
+
+      const labelColors = new Map();
+      const palette = ["#2563eb", "#0891b2", "#db2777", "#ea580c", "#16a34a", "#7c3aed", "#475569"];
+
+      let LiteParse;
+      let parser;
+      let lastResult;
+
+      function setStatus(message, type = "") {
+        statusEl.textContent = message;
+        statusEl.className = `status ${type}`;
+      }
+
+      function colorForLabel(label) {
+        if (!labelColors.has(label)) {
+          labelColors.set(label, palette[labelColors.size % palette.length]);
+        }
+        return labelColors.get(label);
+      }
+
+      async function loadWasm() {
+        const moduleUrl = new URL("../packages/wasm/pkg/liteparse_wasm.js", window.location.href).href;
+        const wasmUrl = new URL("../packages/wasm/pkg/liteparse_wasm_bg.wasm", window.location.href).href;
+        const mod = await import(moduleUrl);
+        await mod.default({ module_or_path: wasmUrl });
+        LiteParse = mod.LiteParse;
+        parser = new LiteParse({
+          ocrEnabled: false,
+          outputFormat: "json",
+          quiet: true,
+          layoutEnabled: true,
+        });
+        setStatus("Ready. Drop a PDF to run layout detection.", "success");
+      }
+
+      function summarizeBlock(block) {
+        const text = (block.textItems || []).map((item) => item.text).join(" ").trim();
+        return text.length > 140 ? `${text.slice(0, 140)}...` : text;
+      }
+
+      function renderLegend(blocks) {
+        const labels = Array.from(new Set(blocks.map((block) => block.label)));
+        legendEl.innerHTML = labels
+          .map(
+            (label) =>
+              `<span><i class="swatch" style="background:${colorForLabel(label)}"></i>${label}</span>`,
+          )
+          .join("");
+      }
+
+      function renderPage(page) {
+        pageShell.innerHTML = "";
+        const pageEl = document.createElement("div");
+        pageEl.className = "page";
+        pageEl.style.aspectRatio = `${page.width} / ${page.height}`;
+
+        for (const block of page.layoutBlocks || []) {
+          const blockEl = document.createElement("div");
+          blockEl.className = "block";
+          blockEl.style.color = colorForLabel(block.label);
+          blockEl.style.left = `${(block.x / page.width) * 100}%`;
+          blockEl.style.top = `${(block.y / page.height) * 100}%`;
+          blockEl.style.width = `${(block.width / page.width) * 100}%`;
+          blockEl.style.height = `${(block.height / page.height) * 100}%`;
+
+          const labelEl = document.createElement("div");
+          labelEl.className = "block-label";
+          labelEl.textContent = `${block.label} ${(block.confidence * 100).toFixed(0)}%`;
+
+          const textEl = document.createElement("div");
+          textEl.className = "block-text";
+          textEl.textContent = summarizeBlock(block);
+
+          blockEl.append(labelEl, textEl);
+          pageEl.append(blockEl);
+        }
+
+        pageShell.append(pageEl);
+      }
+
+      function renderResult() {
+        if (!lastResult) return;
+        const page = lastResult.pages[Number(pageSelect.value || 0)];
+        if (!page) return;
+
+        const blocks = page.layoutBlocks || [];
+        renderPage(page);
+        renderLegend(blocks);
+        jsonOutput.textContent = JSON.stringify(page, null, 2);
+        statsEl.innerHTML = [
+          `<span><strong>${lastResult.pages.length}</strong> pages</span>`,
+          `<span><strong>${blocks.length}</strong> layout blocks on page</span>`,
+          `<span><strong>${lastResult.pages.reduce((sum, p) => sum + (p.layoutBlocks || []).length, 0)}</strong> total blocks</span>`,
+        ].join("");
+      }
+
+      async function parseFile(file) {
+        if (!parser) {
+          setStatus("WASM module is not ready.", "error");
+          return;
+        }
+
+        setStatus(`Parsing ${file.name}...`);
+        try {
+          const started = performance.now();
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          lastResult = await parser.parse(bytes);
+          pageSelect.innerHTML = lastResult.pages
+            .map((page, index) => `<option value="${index}">Page ${page.pageNum}</option>`)
+            .join("");
+          pageSelect.disabled = false;
+          copyJson.disabled = false;
+          renderResult();
+          const elapsed = ((performance.now() - started) / 1000).toFixed(2);
+          setStatus(`Parsed ${lastResult.pages.length} page(s) in ${elapsed}s.`, "success");
+        } catch (error) {
+          console.error(error);
+          setStatus(`Parse error: ${error}`, "error");
+        }
+      }
+
+      dropZone.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        dropZone.classList.add("dragover");
+      });
+
+      dropZone.addEventListener("dragleave", () => {
+        dropZone.classList.remove("dragover");
+      });
+
+      dropZone.addEventListener("drop", (event) => {
+        event.preventDefault();
+        dropZone.classList.remove("dragover");
+        const file = event.dataTransfer.files[0];
+        if (file) parseFile(file);
+      });
+
+      fileInput.addEventListener("change", (event) => {
+        const file = event.target.files[0];
+        if (file) parseFile(file);
+      });
+
+      pageSelect.addEventListener("change", renderResult);
+
+      copyJson.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(jsonOutput.textContent);
+        copyJson.textContent = "Copied";
+        setTimeout(() => {
+          copyJson.textContent = "Copy JSON";
+        }, 1200);
+      });
+
+      loadWasm().catch((error) => {
+        console.error(error);
+        setStatus(`Failed to load local WASM: ${error}`, "error");
+      });
+    </script>
+  </body>
+</html>

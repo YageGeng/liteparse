@@ -224,6 +224,58 @@ impl LiteParse {
             t2.duration_since(t_ocr).as_secs_f64() * 1000.0
         ));
 
+        #[cfg(any(
+            feature = "layout-yolo",
+            feature = "layout-yolo-metal",
+            feature = "layout-yolo-vulkan",
+            feature = "layout-yolo-webgpu"
+        ))]
+        // CONTEXT: Pages only need to be mutable when a layout feature is
+        // compiled in, because layout detection appends blocks after projection.
+        let mut parsed_pages = parsed_pages;
+
+        if self.config.layout_enabled {
+            #[cfg(any(
+                feature = "layout-yolo",
+                feature = "layout-yolo-metal",
+                feature = "layout-yolo-vulkan",
+                feature = "layout-yolo-webgpu"
+            ))]
+            {
+                let t_layout = web_time::Instant::now();
+                // CONTEXT: YOLO-specific rendering, inference, ordering, and
+                // text-item assignment are isolated behind the layout adapter.
+                crate::layout_yolo::detect_layout_blocks_for_pages(
+                    &self.config,
+                    &validated_input,
+                    password,
+                    &mut parsed_pages,
+                )
+                .await?;
+                log(&format!(
+                    "[liteparse] layout: {:.1}ms",
+                    web_time::Instant::now()
+                        .duration_since(t_layout)
+                        .as_secs_f64()
+                        * 1000.0
+                ));
+            }
+
+            #[cfg(not(any(
+                feature = "layout-yolo",
+                feature = "layout-yolo-metal",
+                feature = "layout-yolo-vulkan",
+                feature = "layout-yolo-webgpu"
+            )))]
+            {
+                // CONTEXT: Keep `layout_enabled` as a runtime config flag while
+                // the heavier YOLO implementation remains an optional feature.
+                return Err(LiteParseError::Config(
+                    "layout detection requires a layout feature".into(),
+                ));
+            }
+        }
+
         let full_text = if self.config.output_format == crate::config::OutputFormat::Markdown {
             let md = markdown::format_markdown(&parsed_pages, &outline, self.config.image_mode);
             let t3 = web_time::Instant::now();

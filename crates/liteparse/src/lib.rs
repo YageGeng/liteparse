@@ -9,7 +9,7 @@ pub use config::{LiteParseConfig, OutputFormat};
 pub use error::LiteParseError;
 pub use parser::{LiteParse, ParseResult, ScreenshotResult};
 pub use search::{SearchOptions, search_items};
-pub use types::{ParsedPage, TextItem};
+pub use types::{LayoutBlock, ParsedPage, TextItem};
 
 // ── Modules with user-facing types (visible in docs) ───────────────────
 pub mod config;
@@ -30,6 +30,24 @@ pub mod figure_cluster;
 pub mod font_cmap;
 #[doc(hidden)]
 pub mod glyph_names;
+#[cfg(any(
+    feature = "layout-yolo",
+    feature = "layout-yolo-metal",
+    feature = "layout-yolo-vulkan",
+    feature = "layout-yolo-webgpu"
+))]
+#[doc(hidden)]
+/// Assigns layout blocks back onto text items without exposing YOLO internals.
+pub(crate) mod layout_merge;
+#[cfg(any(
+    feature = "layout-yolo",
+    feature = "layout-yolo-metal",
+    feature = "layout-yolo-vulkan",
+    feature = "layout-yolo-webgpu"
+))]
+#[doc(hidden)]
+/// Isolates YOLO rendering and inference behind the generic layout flag.
+pub(crate) mod layout_yolo;
 #[doc(hidden)]
 pub mod markdown_layout;
 #[doc(hidden)]

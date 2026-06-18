@@ -1604,6 +1604,8 @@ impl SegmentBuilder {
                 confidence: None,
                 link: None,
                 strike: false,
+                layout_block_id: None,
+                layout_label: None,
             });
         }
 

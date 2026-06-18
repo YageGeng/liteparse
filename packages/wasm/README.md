@@ -87,6 +87,14 @@ npm run build:bundler   # for webpack/rollup/vite
 npm run build:nodejs    # for node.js
 ```
 
+Optional YOLO layout builds are available when the exported model assets are
+present:
+
+```sh
+npm run build:layout-yolo
+npm run build:layout-yolo-webgpu
+```
+
 Output goes to `pkg/`.
 
 ## License

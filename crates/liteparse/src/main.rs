@@ -83,6 +83,10 @@ struct ParseCommand {
     #[arg(long)]
     preserve_small_text: bool,
 
+    /// Enable document layout detection
+    #[arg(long)]
+    layout: bool,
+
     /// Password for encrypted/protected documents
     #[arg(long)]
     password: Option<String>,
@@ -185,6 +189,10 @@ struct BatchParseCommand {
     #[arg(long, default_value = "150")]
     dpi: f32,
 
+    /// Enable document layout detection
+    #[arg(long)]
+    layout: bool,
+
     /// Recursively search input directory
     #[arg(long)]
     recursive: bool,
@@ -278,6 +286,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ocr_server_headers: cmd.ocr_server_headers,
                 image_mode,
                 extract_links: !cmd.no_links,
+                layout_enabled: cmd.layout,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -378,6 +387,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
                 ocr_server_headers: cmd.ocr_server_headers,
+                layout_enabled: cmd.layout,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {

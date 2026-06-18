@@ -30,6 +30,7 @@ export interface LiteParseNativeConfig {
   outputFormat?: string;
   imageMode?: string;
   extractLinks?: boolean;
+  layoutEnabled?: boolean;
   preserveVerySmallText?: boolean;
   password?: string;
   quiet?: boolean;
@@ -46,6 +47,8 @@ export interface NativeTextItem {
   fontSize?: number;
   confidence?: number;
   rotation?: number;
+  layoutBlockId?: number;
+  layoutLabel?: string;
 }
 
 export interface NativeGraphic {
@@ -79,6 +82,17 @@ export interface NativeParsedPage {
   height: number;
   text: string;
   textItems: NativeTextItem[];
+  layoutBlocks: NativeLayoutBlock[];
+}
+
+export interface NativeLayoutBlock {
+  id: number;
+  label: string;
+  confidence: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface NativeExtractedImage {

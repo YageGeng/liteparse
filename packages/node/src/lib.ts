@@ -30,6 +30,8 @@ export interface LiteParseConfig {
   imageMode: ImageMode;
   /** Render hyperlink annotations as `[text](url)` in markdown output (default: true). */
   extractLinks: boolean;
+  /** Enable document layout detection. */
+  layoutEnabled: boolean;
   preserveVerySmallText: boolean;
   password?: string;
   quiet: boolean;
@@ -47,6 +49,20 @@ export interface TextItem {
   confidence?: number;
   /** Rotation in degrees (viewport space). Defaults to 0 when omitted. */
   rotation?: number;
+  /** Page-local layout block id assigned after layout detection. */
+  layoutBlockId?: number;
+  /** Layout label assigned after layout detection. */
+  layoutLabel?: string;
+}
+
+export interface LayoutBlock {
+  id: number;
+  label: string;
+  confidence: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 /**
@@ -93,6 +109,7 @@ export interface ParsedPage {
   height: number;
   text: string;
   textItems: TextItem[];
+  layoutBlocks: LayoutBlock[];
 }
 
 export interface ExtractedImage {
@@ -137,6 +154,7 @@ export class LiteParse {
       outputFormat: userConfig.outputFormat,
       imageMode: userConfig.imageMode,
       extractLinks: userConfig.extractLinks,
+      layoutEnabled: userConfig.layoutEnabled,
       preserveVerySmallText: userConfig.preserveVerySmallText,
       password: userConfig.password,
       quiet: userConfig.quiet,
@@ -158,6 +176,7 @@ export class LiteParse {
       outputFormat: (resolved.outputFormat as OutputFormat) ?? "json",
       imageMode: (resolved.imageMode as ImageMode) ?? "placeholder",
       extractLinks: resolved.extractLinks ?? true,
+      layoutEnabled: resolved.layoutEnabled ?? false,
       preserveVerySmallText: resolved.preserveVerySmallText ?? false,
       password: resolved.password ?? undefined,
       quiet: resolved.quiet ?? false,
@@ -229,6 +248,19 @@ function toPage(p: NativeParsedPage): ParsedPage {
     height: p.height,
     text: p.text,
     textItems: p.textItems.map(toTextItem),
+    layoutBlocks: (p.layoutBlocks ?? []).map(toLayoutBlock),
+  };
+}
+
+function toLayoutBlock(block: NativeParsedPage["layoutBlocks"][number]): LayoutBlock {
+  return {
+    id: block.id,
+    label: block.label,
+    confidence: block.confidence,
+    x: block.x,
+    y: block.y,
+    width: block.width,
+    height: block.height,
   };
 }
 
@@ -251,6 +283,8 @@ function toTextItem(item: NativeTextItem): TextItem {
     fontName: item.fontName,
     fontSize: item.fontSize,
     confidence: item.confidence,
+    layoutBlockId: item.layoutBlockId,
+    layoutLabel: item.layoutLabel,
   };
 }
 

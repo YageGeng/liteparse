@@ -29,6 +29,10 @@ struct PyTextItem {
     font_size: Option<f64>,
     #[pyo3(get)]
     confidence: Option<f64>,
+    #[pyo3(get)]
+    layout_block_id: Option<usize>,
+    #[pyo3(get)]
+    layout_label: Option<String>,
 }
 
 #[pymethods]
@@ -52,6 +56,8 @@ impl PyTextItem {
             font_name: self.font_name.clone(),
             font_size: self.font_size.map(|v| v as f32),
             confidence: self.confidence.map(|v| v as f32),
+            layout_block_id: self.layout_block_id,
+            layout_label: self.layout_label.clone(),
             ..Default::default()
         }
     }
@@ -66,6 +72,52 @@ impl PyTextItem {
             font_name: item.font_name,
             font_size: item.font_size.map(|v| v as f64),
             confidence: item.confidence.map(|v| v as f64).or(Some(1.0)),
+            layout_block_id: item.layout_block_id,
+            layout_label: item.layout_label,
+        }
+    }
+}
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
+struct PyLayoutBlock {
+    #[pyo3(get)]
+    id: usize,
+    #[pyo3(get)]
+    label: String,
+    #[pyo3(get)]
+    confidence: f64,
+    #[pyo3(get)]
+    x: f64,
+    #[pyo3(get)]
+    y: f64,
+    #[pyo3(get)]
+    width: f64,
+    #[pyo3(get)]
+    height: f64,
+}
+
+#[pymethods]
+impl PyLayoutBlock {
+    fn __repr__(&self) -> String {
+        format!(
+            "LayoutBlock(id={}, label='{}', confidence={})",
+            self.id, self.label, self.confidence
+        )
+    }
+}
+
+impl PyLayoutBlock {
+    /// Convert a Rust layout block into the Python representation.
+    fn from_rust(block: liteparse::types::LayoutBlock) -> Self {
+        Self {
+            id: block.id,
+            label: block.label,
+            confidence: block.confidence as f64,
+            x: block.x as f64,
+            y: block.y as f64,
+            width: block.width as f64,
+            height: block.height as f64,
         }
     }
 }
@@ -83,6 +135,8 @@ struct PyParsedPage {
     text: String,
     #[pyo3(get)]
     text_items: Vec<PyTextItem>,
+    #[pyo3(get)]
+    layout_blocks: Vec<PyLayoutBlock>,
 }
 
 #[pymethods]
@@ -109,6 +163,11 @@ impl PyParsedPage {
                 .text_items
                 .into_iter()
                 .map(PyTextItem::from_rust)
+                .collect(),
+            layout_blocks: page
+                .layout_blocks
+                .into_iter()
+                .map(PyLayoutBlock::from_rust)
                 .collect(),
         }
     }
@@ -263,6 +322,8 @@ struct PyLiteParseConfig {
     quiet: bool,
     #[pyo3(get)]
     num_workers: usize,
+    #[pyo3(get)]
+    layout_enabled: bool,
 }
 
 #[pymethods]
@@ -294,6 +355,7 @@ impl PyLiteParseConfig {
             password: cfg.password.clone(),
             quiet: cfg.quiet,
             num_workers: cfg.num_workers,
+            layout_enabled: cfg.layout_enabled,
         }
     }
 }
@@ -328,6 +390,7 @@ impl LiteParse {
         num_workers = None,
         image_mode = None,
         extract_links = None,
+        layout_enabled = None,
     ))]
     fn new(
         ocr_language: Option<String>,
@@ -344,6 +407,7 @@ impl LiteParse {
         num_workers: Option<usize>,
         image_mode: Option<String>,
         extract_links: Option<bool>,
+        layout_enabled: Option<bool>,
     ) -> PyResult<Self> {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = ocr_language {
@@ -395,6 +459,9 @@ impl LiteParse {
         }
         if let Some(v) = extract_links {
             cfg.extract_links = v;
+        }
+        if let Some(v) = layout_enabled {
+            cfg.layout_enabled = v;
         }
 
         let inner = liteparse::parser::LiteParse::new(cfg.clone());
@@ -501,6 +568,7 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyParseResult>()?;
     m.add_class::<PyExtractedImage>()?;
     m.add_class::<PyParsedPage>()?;
+    m.add_class::<PyLayoutBlock>()?;
     m.add_class::<PyTextItem>()?;
     m.add_class::<PyScreenshotResult>()?;
     m.add_function(wrap_pyfunction!(run_cli, m)?)?;

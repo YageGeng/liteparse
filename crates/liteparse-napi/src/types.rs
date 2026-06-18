@@ -2,7 +2,7 @@ use napi_derive::napi;
 
 use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
 use liteparse::parser::ParseResult;
-use liteparse::types::{GraphicPrimitive, Page, ParsedPage, Rect, TextItem};
+use liteparse::types::{GraphicPrimitive, LayoutBlock, Page, ParsedPage, Rect, TextItem};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -42,6 +42,8 @@ pub struct JsLiteParseConfig {
     /// Render hyperlink annotations as `[text](url)` in markdown output
     /// (default true). Set false for plain anchor text.
     pub extract_links: Option<bool>,
+    /// Enable document layout detection.
+    pub layout_enabled: Option<bool>,
 }
 
 impl JsLiteParseConfig {
@@ -97,6 +99,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.extract_links {
             cfg.extract_links = v;
         }
+        if let Some(v) = self.layout_enabled {
+            cfg.layout_enabled = v;
+        }
         cfg
     }
 
@@ -124,6 +129,7 @@ impl JsLiteParseConfig {
                 ImageMode::Embed => "embed".to_string(),
             }),
             extract_links: Some(cfg.extract_links),
+            layout_enabled: Some(cfg.layout_enabled),
         }
     }
 }
@@ -145,6 +151,10 @@ pub struct JsTextItem {
     pub confidence: Option<f64>,
     /// Rotation in degrees (viewport space). Defaults to 0 when omitted.
     pub rotation: Option<f64>,
+    /// Page-local layout block id assigned after layout detection.
+    pub layout_block_id: Option<u32>,
+    /// Layout label assigned after layout detection.
+    pub layout_label: Option<String>,
 }
 
 impl JsTextItem {
@@ -159,6 +169,8 @@ impl JsTextItem {
             font_name: self.font_name.clone(),
             font_size: self.font_size.map(|v| v as f32),
             confidence: self.confidence.map(|v| v as f32),
+            layout_block_id: self.layout_block_id.map(|v| v as usize),
+            layout_label: self.layout_label.clone(),
             ..Default::default()
         }
     }
@@ -174,6 +186,8 @@ impl JsTextItem {
             font_name: item.font_name.clone(),
             font_size: item.font_size.map(|v| v as f64),
             confidence: item.confidence.map(|v| v as f64).or(Some(1.0)),
+            layout_block_id: item.layout_block_id.map(|v| v as u32),
+            layout_label: item.layout_label.clone(),
         }
     }
 }
@@ -289,6 +303,34 @@ impl JsPageInput {
 // ParsedPage
 // ---------------------------------------------------------------------------
 
+/// A detected document layout block on a parsed page.
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsLayoutBlock {
+    pub id: u32,
+    pub label: String,
+    pub confidence: f64,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl JsLayoutBlock {
+    /// Convert a Rust layout block into the JavaScript representation.
+    fn from_rust(block: &LayoutBlock) -> Self {
+        Self {
+            id: block.id as u32,
+            label: block.label.clone(),
+            confidence: block.confidence as f64,
+            x: block.x as f64,
+            y: block.y as f64,
+            width: block.width as f64,
+            height: block.height as f64,
+        }
+    }
+}
+
 #[napi(object)]
 #[derive(Clone)]
 pub struct JsParsedPage {
@@ -297,6 +339,7 @@ pub struct JsParsedPage {
     pub height: f64,
     pub text: String,
     pub text_items: Vec<JsTextItem>,
+    pub layout_blocks: Vec<JsLayoutBlock>,
 }
 
 impl JsParsedPage {
@@ -307,6 +350,11 @@ impl JsParsedPage {
             height: page.page_height as f64,
             text: page.text.clone(),
             text_items: page.text_items.iter().map(JsTextItem::from_rust).collect(),
+            layout_blocks: page
+                .layout_blocks
+                .iter()
+                .map(JsLayoutBlock::from_rust)
+                .collect(),
         }
     }
 }

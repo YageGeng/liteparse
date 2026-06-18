@@ -8,6 +8,7 @@ from liteparse._liteparse import search_items as _native_search_items
 
 from .types import (
     ExtractedImage,
+    LayoutBlock,
     LiteParseConfig,
     ParsedPage,
     ParseError,
@@ -31,8 +32,22 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                 font_name=item.font_name,
                 font_size=item.font_size,
                 confidence=item.confidence,
+                layout_block_id=getattr(item, "layout_block_id", None),
+                layout_label=getattr(item, "layout_label", None),
             )
             for item in native_page.text_items
+        ]
+        layout_blocks = [
+            LayoutBlock(
+                id=block.id,
+                label=block.label,
+                confidence=block.confidence,
+                x=block.x,
+                y=block.y,
+                width=block.width,
+                height=block.height,
+            )
+            for block in getattr(native_page, "layout_blocks", [])
         ]
         pages.append(
             ParsedPage(
@@ -41,6 +56,7 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                 height=native_page.height,
                 text=native_page.text,
                 text_items=text_items,
+                layout_blocks=layout_blocks,
             )
         )
     images = [
@@ -89,6 +105,7 @@ class LiteParse:
         num_workers: Optional[int] = None,
         image_mode: Optional[str] = None,
         extract_links: Optional[bool] = None,
+        layout_enabled: Optional[bool] = None,
     ):
         """
         Initialize LiteParse parser.
@@ -108,6 +125,7 @@ class LiteParse:
             num_workers: Number of concurrent OCR workers (default: CPU cores - 1)
             extract_links: Render hyperlink annotations as ``[text](url)`` in
                 markdown output (default: True). Set False for plain anchor text.
+            layout_enabled: Enable document layout detection.
         """
         kwargs = {}
         if ocr_enabled is not None:
@@ -138,6 +156,8 @@ class LiteParse:
             kwargs["image_mode"] = image_mode
         if extract_links is not None:
             kwargs["extract_links"] = extract_links
+        if layout_enabled is not None:
+            kwargs["layout_enabled"] = layout_enabled
 
         self._native = _NativeLiteParse(**kwargs)
 
@@ -234,6 +254,7 @@ class LiteParse:
             password=cfg.password,
             quiet=cfg.quiet,
             num_workers=cfg.num_workers,
+            layout_enabled=cfg.layout_enabled,
         )
 
     def __repr__(self) -> str:
