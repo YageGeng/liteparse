@@ -42,7 +42,9 @@ All optional, camelCase:
 | `maxPages` | `number` | `1000` | Stop after this many pages |
 | `targetPages` | `string` | — | e.g. `"1-5,10,15-20"` |
 | `dpi` | `number` | `150` | Render DPI for OCR / screenshots |
-| `outputFormat` | `"json" \| "text"` | `"json"` | Format used by `parser.format(...)` |
+| `outputFormat` | `"json" \| "text" \| "markdown"` | `"json"` | Output format; `"markdown"` returns rendered Markdown on `result.text` |
+| `imageMode` | `"off" \| "placeholder" \| "embed"` | `"placeholder"` | How raster images are surfaced in markdown output |
+| `extractLinks` | `boolean` | `true` | Render hyperlink annotations as `[text](url)` in markdown output |
 | `preserveVerySmallText` | `boolean` | `false` | Keep tiny text that's normally filtered |
 | `password` | `string` | — | Password for protected PDFs |
 | `quiet` | `boolean` | `false` | Suppress progress logging |

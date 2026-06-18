@@ -2,7 +2,7 @@
 title: OCR Configuration
 description: Configure OCR in LiteParse — built-in Tesseract, or bring your own via HTTP servers.
 sidebar:
-  order: 2
+  order: 3
 ---
 
 LiteParse uses OCR selectively — only on embedded images or pages where native text extraction didn't find text. This keeps parsing fast while still capturing text from scanned pages and embedded images.

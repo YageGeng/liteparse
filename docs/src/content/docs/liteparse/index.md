@@ -14,6 +14,7 @@ LiteParse is designed specifically for use cases that require fast, accurate tex
 ## What can LiteParse do?
 
 - **Parse PDFs** with precise spatial layout. Text comes back positioned where it appears on the page
+- **Render to Markdown** with headings, tables, lists, images, and links — clean structured output for LLMs and RAG pipelines
 - **Extract bounding boxes** for every text line, ready for downstream processing or visualization
 - **OCR scanned documents** using built-in Tesseract or plug in your own OCR server
 - **Parse Office files and images** with support for DOCX, XLSX, PPTX, PNG, JPG, and more via automatic conversion
@@ -23,6 +24,7 @@ LiteParse is designed specifically for use cases that require fast, accurate tex
 ## Get started
 
 - [Getting started](/liteparse/getting_started/): Install LiteParse and parse your first document.
+- [Markdown output](/liteparse/guides/markdown/): Render documents to clean, structured Markdown.
 - [Library usage](/liteparse/guides/library-usage/): Use LiteParse from TypeScript or Python code.
 - [Browser usage (WASM)](/liteparse/guides/browser-usage/): Run LiteParse in the browser with zero server dependencies.
 - [CLI reference](/liteparse/cli-reference/): Complete command and option reference.

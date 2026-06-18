@@ -24,6 +24,24 @@ for page in result.pages:
     print(f"Page {page.page_num}: {len(page.text_items)} text items")
 ```
 
+## Markdown Output
+
+LiteParse can render documents directly to Markdown including headings, tables, lists,
+images, and links reconstructed from the spatial layout. Great for feeding LLMs
+and RAG pipelines. The rendered Markdown is returned on `result.text`:
+
+```python
+parser = LiteParse(
+    output_format="markdown",   # "json" | "text" | "markdown"
+    image_mode="placeholder",   # "placeholder" | "off" | "embed"
+    extract_links=True,         # render [text](url) link syntax (default: True)
+)
+result = parser.parse("document.pdf")
+print(result.text)  # rendered Markdown
+```
+
+> Reconstruction quality varies with document complexity.
+
 ## Configuration
 
 All options are passed to the constructor:
@@ -37,6 +55,9 @@ parser = LiteParse(
     max_pages=1000,                # Max pages to parse
     target_pages="1-5,10",         # Specific pages (optional)
     dpi=150,                       # Rendering DPI
+    output_format="json",          # "json" | "text" | "markdown"
+    image_mode="placeholder",      # Markdown image handling: "placeholder" | "off" | "embed"
+    extract_links=True,            # Render [text](url) links in markdown output
     preserve_very_small_text=False, # Keep tiny text
     password=None,                 # Password for protected documents
     quiet=False,                   # Suppress progress output

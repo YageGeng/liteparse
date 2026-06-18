@@ -25,6 +25,24 @@ for (const page of result.pages) {
 }
 ```
 
+## Markdown Output
+
+LiteParse can render documents directly to Markdown including headings, tables, lists,
+images, and links reconstructed from the spatial layout. Great for feeding LLMs
+and RAG pipelines. The rendered Markdown is returned on `result.text`:
+
+```typescript
+const parser = new LiteParse({
+  outputFormat: 'markdown',     // "json" | "text" | "markdown"
+  imageMode: 'placeholder',     // "placeholder" | "off" | "embed"
+  extractLinks: true,           // render [text](url) link syntax (default: true)
+});
+const result = await parser.parse('document.pdf');
+console.log(result.text); // rendered Markdown
+```
+
+> Reconstruction quality varies with document complexity.
+
 ## Configuration
 
 All options are passed to the constructor:
@@ -38,6 +56,9 @@ const parser = new LiteParse({
   maxPages: 1000,                // Max pages to parse
   targetPages: '1-5,10',        // Specific pages (optional)
   dpi: 150,                      // Rendering DPI
+  outputFormat: 'json',          // "json" | "text" | "markdown"
+  imageMode: 'placeholder',      // Markdown image handling: "placeholder" | "off" | "embed"
+  extractLinks: true,            // Render [text](url) links in markdown output
   preserveVerySmallText: false,  // Keep tiny text
   password: undefined,           // Password for protected documents
   quiet: false,                  // Suppress progress output

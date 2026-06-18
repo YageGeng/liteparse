@@ -2,7 +2,7 @@
 title: Multi-Format Support
 description: Parse Word documents, spreadsheets, presentations, and images with LiteParse.
 sidebar:
-  order: 3
+  order: 4
 ---
 
 LiteParse automatically converts non-PDF formats to PDF before parsing. This lets you use the same parsing pipeline for Office documents, images, and more.

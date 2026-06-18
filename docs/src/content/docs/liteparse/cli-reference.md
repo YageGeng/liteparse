@@ -26,7 +26,10 @@ lit parse [options] <file>
 | Option | Description | Default |
 |--------|-------------|---------|
 | `-o, --output <file>` | Write output to a file instead of stdout | — |
-| `--format <format>` | Output format: `json` or `text` | `text` |
+| `--format <format>` | Output format: `json`, `text`, or `markdown` | `text` |
+| `--image-mode <mode>` | Markdown image handling: `off`, `placeholder`, or `embed` | `placeholder` |
+| `--image-output-dir <dir>` | Directory to write images to when `--image-mode embed` | — |
+| `--no-links` | Emit link anchor text as plain text (no `[text](url)`) in markdown | — |
 | `--no-ocr` | Disable OCR entirely | — |
 | `--ocr-language <lang>` | OCR language code (Tesseract format) | `eng` |
 | `--ocr-server-url <url>` | HTTP OCR server URL | — (uses Tesseract) |
@@ -47,6 +50,12 @@ lit parse report.pdf
 
 # JSON output with bounding boxes
 lit parse report.pdf --format json -o report.json
+
+# Markdown output (headings, tables, lists, images, links)
+lit parse report.pdf --format markdown -o report.md
+
+# Markdown with embedded images written to disk
+lit parse report.pdf --format markdown --image-mode embed --image-output-dir ./images
 
 # Parse pages 1-5 only, no OCR
 lit parse report.pdf --target-pages "1-5" --no-ocr
@@ -85,7 +94,7 @@ lit batch-parse [options] <input-dir> <output-dir>
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--format <format>` | Output format: `json` or `text` | `text` |
+| `--format <format>` | Output format: `json`, `text`, or `markdown` | `text` |
 | `--no-ocr` | Disable OCR entirely | — |
 | `--ocr-language <lang>` | OCR language code | `eng` |
 | `--ocr-server-url <url>` | HTTP OCR server URL | — (uses Tesseract) |

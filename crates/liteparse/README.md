@@ -55,7 +55,7 @@ let config = LiteParseConfig {
     max_pages: 1000,                      // Max pages to parse
     target_pages: Some("1-5,10".into()),  // Specific pages (optional)
     dpi: 150.0,                           // Rendering DPI
-    output_format: OutputFormat::Json,    // Output format
+    output_format: OutputFormat::Json,    // Json | Text | Markdown
     preserve_very_small_text: false,      // Keep tiny text
     password: None,                       // Password for protected documents
     quiet: false,                         // Suppress progress output
@@ -64,6 +64,33 @@ let config = LiteParseConfig {
 
 let parser = LiteParse::new(config);
 ```
+
+## Markdown Output
+
+LiteParse can render documents directly to Markdown, including headings, tables, lists,
+images, and links reconstructed from the spatial layout. Set
+`output_format: OutputFormat::Markdown`; the rendered Markdown is returned on
+`result.text`. Two related knobs control Markdown rendering:
+
+- `image_mode` (`ImageMode::Placeholder` default | `Off` | `Embed`) — how raster
+  images are surfaced in the output.
+- `extract_links` (default `true`) — render hyperlink annotations as
+  `[text](url)`; set `false` for plain anchor text.
+
+```rust
+use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
+
+let config = LiteParseConfig {
+    output_format: OutputFormat::Markdown,
+    image_mode: ImageMode::Placeholder,
+    extract_links: true,
+    ..Default::default()
+};
+let result = LiteParse::new(config).parse("document.pdf").await?;
+println!("{}", result.text); // rendered Markdown
+```
+
+> Reconstruction quality varies with document complexity.
 
 ## Parsing from Bytes
 
@@ -105,6 +132,7 @@ The crate also builds the `lit` CLI binary:
 ```bash
 lit parse document.pdf
 lit parse document.pdf --format json -o output.json
+lit parse document.pdf --format markdown -o output.md
 lit screenshot document.pdf -o ./screenshots
 lit batch-parse ./input ./output
 ```
