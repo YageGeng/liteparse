@@ -11,6 +11,8 @@ use crate::library::Library;
 /// section.
 pub struct Bitmap<'lib> {
     handle: pdfium_sys::FPDF_BITMAP,
+    #[cfg(target_arch = "wasm32")]
+    buffer: Option<Vec<u8>>,
     _lib: PhantomData<&'lib Library>,
 }
 
@@ -23,6 +25,8 @@ impl<'lib> Bitmap<'lib> {
     pub unsafe fn from_handle(handle: pdfium_sys::FPDF_BITMAP) -> Self {
         Bitmap {
             handle,
+            #[cfg(target_arch = "wasm32")]
+            buffer: None,
             _lib: PhantomData,
         }
     }
@@ -36,13 +40,56 @@ impl<'lib> Bitmap<'lib> {
     /// from the call site (e.g. returning a `Bitmap<'lib>` from a method on
     /// `Page<'_, 'lib>`, whose existence already proves the lock is held).
     pub unsafe fn new(width: i32, height: i32) -> Result<Self, PdfiumError> {
+        if width <= 0 || height <= 0 {
+            return Err(PdfiumError::OperationFailed);
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            unsafe { Self::new_with_external_buffer(width, height) }
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let handle = unsafe {
+                ffi!(FPDFBitmap_CreateEx(
+                    width,
+                    height,
+                    pdfium_sys::FPDFBitmap_BGRA as i32,
+                    std::ptr::null_mut(),
+                    0, // stride=0 lets pdfium choose
+                ))
+            };
+            if handle.is_null() {
+                return Err(PdfiumError::OperationFailed);
+            }
+            Ok(Bitmap {
+                handle,
+                _lib: PhantomData,
+            })
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    /// Create a BGRA bitmap backed by Rust-owned memory for Wasm PDFium.
+    ///
+    /// Browser Wasm builds should avoid PDFium-owned bitmap allocation because
+    /// the static WASI archive and Rust allocator do not share ownership
+    /// semantics. Passing an explicit buffer and stride keeps the pixel memory
+    /// valid and inspectable for the lifetime of this wrapper.
+    unsafe fn new_with_external_buffer(width: i32, height: i32) -> Result<Self, PdfiumError> {
+        let stride = width.checked_mul(4).ok_or(PdfiumError::OperationFailed)?;
+        let buffer_len = stride
+            .checked_mul(height)
+            .ok_or(PdfiumError::OperationFailed)? as usize;
+        let mut buffer = vec![0; buffer_len];
         let handle = unsafe {
             ffi!(FPDFBitmap_CreateEx(
                 width,
                 height,
                 pdfium_sys::FPDFBitmap_BGRA as i32,
-                std::ptr::null_mut(),
-                0, // stride=0 lets pdfium choose
+                buffer.as_mut_ptr() as *mut std::ffi::c_void,
+                stride,
             ))
         };
         if handle.is_null() {
@@ -50,6 +97,7 @@ impl<'lib> Bitmap<'lib> {
         }
         Ok(Bitmap {
             handle,
+            buffer: Some(buffer),
             _lib: PhantomData,
         })
     }
@@ -89,6 +137,11 @@ impl<'lib> Bitmap<'lib> {
     /// Get the raw pixel buffer as a byte slice.
     /// Format is BGRA, row-major, with `stride()` bytes per row.
     pub fn buffer(&self) -> &[u8] {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(buffer) = self.buffer.as_deref() {
+            return buffer;
+        }
+
         let ptr = unsafe { ffi!(FPDFBitmap_GetBuffer(self.handle)) };
         let len = (self.stride() * self.height()) as usize;
         unsafe { std::slice::from_raw_parts(ptr as *const u8, len) }
