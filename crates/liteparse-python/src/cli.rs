@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
-use liteparse::config::{LiteParseConfig, OutputFormat};
+use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
 use liteparse::conversion;
-use liteparse::output::{json, markdown, text};
+use liteparse::output::{json, text};
 use liteparse::parser::LiteParse;
 
 #[derive(Parser, Debug)]
@@ -56,6 +56,32 @@ struct ParseCommand {
     quiet: bool,
     #[arg(long)]
     num_workers: Option<usize>,
+    /// How to surface raster images in markdown output: `off`, `placeholder`
+    /// (default), or `embed` (extracts PNG bytes, written next to the output
+    /// when `--image-output-dir` is set).
+    #[arg(long, default_value = "placeholder")]
+    image_mode: String,
+    /// Directory to write embedded images to when `--image-mode embed` is set.
+    /// Each image is written as `image_{id}.png` to match the markdown
+    /// references. Created if missing.
+    #[arg(long)]
+    image_output_dir: Option<String>,
+    /// Disable hyperlink extraction. By default URI link annotations render as
+    /// `[text](url)` in markdown output; pass this to emit plain anchor text.
+    #[arg(long)]
+    no_links: bool,
+    /// Enable YOLO document layout detection
+    #[arg(long)]
+    layout: bool,
+    /// Minimum layout detection confidence score
+    #[arg(long, default_value = "0.25")]
+    layout_confidence_threshold: f32,
+    /// IoU threshold for layout detection NMS
+    #[arg(long, default_value = "0.45")]
+    layout_iou_threshold: f32,
+    /// Square image size for layout detection
+    #[arg(long, default_value = "1280")]
+    layout_image_size: u32,
 }
 
 #[derive(Args, Debug)]
@@ -122,15 +148,35 @@ struct BatchParseCommand {
     quiet: bool,
     #[arg(long)]
     num_workers: Option<usize>,
+    #[arg(long)]
+    layout: bool,
+    #[arg(long, default_value = "0.25")]
+    layout_confidence_threshold: f32,
+    #[arg(long, default_value = "0.45")]
+    layout_iou_threshold: f32,
+    #[arg(long, default_value = "1280")]
+    layout_image_size: u32,
 }
 
 fn parse_output_format(s: &str) -> Result<OutputFormat, String> {
     match s.to_lowercase().as_str() {
         "json" => Ok(OutputFormat::Json),
-        "markdown" | "md" => Ok(OutputFormat::Markdown),
         "text" => Ok(OutputFormat::Text),
+        "markdown" | "md" => Ok(OutputFormat::Markdown),
         _ => Err(format!(
-            "unknown format '{}', expected 'json', 'markdown', or 'text'",
+            "unknown format '{}', expected 'json', 'text', or 'markdown'",
+            s
+        )),
+    }
+}
+
+fn parse_image_mode(s: &str) -> Result<ImageMode, String> {
+    match s.to_lowercase().as_str() {
+        "off" | "none" => Ok(ImageMode::Off),
+        "placeholder" => Ok(ImageMode::Placeholder),
+        "embed" => Ok(ImageMode::Embed),
+        _ => Err(format!(
+            "unknown image-mode '{}', expected 'off', 'placeholder', or 'embed'",
             s
         )),
     }
@@ -144,6 +190,7 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Parse(cmd) => {
             let format = parse_output_format(&cmd.format)?;
+            let image_mode = parse_image_mode(&cmd.image_mode)?;
             let mut config = LiteParseConfig {
                 ocr_language: cmd.ocr_language,
                 ocr_enabled: !cmd.no_ocr,
@@ -156,6 +203,12 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 password: cmd.password,
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
+                image_mode,
+                extract_links: !cmd.no_links,
+                layout_enabled: cmd.layout,
+                layout_confidence_threshold: cmd.layout_confidence_threshold,
+                layout_iou_threshold: cmd.layout_iou_threshold,
+                layout_image_size: cmd.layout_image_size,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -165,9 +218,25 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
             let result = rt.block_on(lp.parse(&cmd.file))?;
             let formatted = match lp.config().output_format {
                 OutputFormat::Json => json::format_json(&result.pages)?,
-                OutputFormat::Markdown => markdown::format_markdown(&result.pages),
                 OutputFormat::Text => text::format_text(&result.pages),
+                OutputFormat::Markdown => result.text.clone(),
             };
+            if let Some(dir) = cmd.image_output_dir.as_deref()
+                && !result.images.is_empty()
+            {
+                std::fs::create_dir_all(dir)?;
+                for img in &result.images {
+                    let path = format!("{}/image_{}.{}", dir, img.id, img.format);
+                    std::fs::write(&path, &img.bytes)?;
+                }
+                if !cmd.quiet {
+                    eprintln!(
+                        "[liteparse] wrote {} image(s) to {}",
+                        result.images.len(),
+                        dir
+                    );
+                }
+            }
             match cmd.output {
                 Some(path) => {
                     std::fs::write(&path, &formatted)?;
@@ -270,6 +339,10 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
                 password: cmd.password,
                 quiet: cmd.quiet,
                 ocr_server_url: cmd.ocr_server_url,
+                layout_enabled: cmd.layout,
+                layout_confidence_threshold: cmd.layout_confidence_threshold,
+                layout_iou_threshold: cmd.layout_iou_threshold,
+                layout_image_size: cmd.layout_image_size,
                 ..Default::default()
             };
             if let Some(n) = cmd.num_workers {
@@ -310,16 +383,14 @@ pub fn run_cli(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
 
                 match rt.block_on(lp.parse(file_path)) {
                     Ok(result) => {
-                        let fmt_result: Result<String, Box<dyn std::error::Error>> = match lp
-                            .config()
-                            .output_format
-                        {
-                            OutputFormat::Json => {
-                                json::format_json(&result.pages).map_err(|e| e.into())
-                            }
-                            OutputFormat::Markdown => Ok(markdown::format_markdown(&result.pages)),
-                            OutputFormat::Text => Ok(text::format_text(&result.pages)),
-                        };
+                        let fmt_result: Result<String, Box<dyn std::error::Error>> =
+                            match lp.config().output_format {
+                                OutputFormat::Json => {
+                                    json::format_json(&result.pages).map_err(|e| e.into())
+                                }
+                                OutputFormat::Text => Ok(text::format_text(&result.pages)),
+                                OutputFormat::Markdown => Ok(result.text.clone()),
+                            };
                         match fmt_result {
                             Ok(formatted) => {
                                 std::fs::write(&out_path, &formatted)?;

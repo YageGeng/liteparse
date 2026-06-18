@@ -1,4 +1,4 @@
-use crate::types::{LayoutBlock, TextItem};
+use crate::types::{LayoutBlock, Page, TextItem};
 
 const MIN_OVERLAP_RATIO: f32 = 0.5;
 const PICTURE_LABEL: &str = "Picture";
@@ -88,6 +88,27 @@ pub fn compact_layout_blocks(blocks: &mut Vec<LayoutBlock>, items: &mut [TextIte
     }
 
     *blocks = retained;
+}
+
+pub fn project_layout_text(
+    page_number: usize,
+    page_width: f32,
+    page_height: f32,
+    text_items: Vec<TextItem>,
+) -> String {
+    crate::projection::project_pages_to_grid(vec![Page {
+        page_number,
+        page_width,
+        page_height,
+        text_items,
+        graphics: Vec::new(),
+        struct_nodes: Vec::new(),
+        image_refs: Vec::new(),
+    }])
+    .into_iter()
+    .next()
+    .map(|page| page.text)
+    .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Copy)]

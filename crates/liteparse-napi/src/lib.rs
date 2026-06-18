@@ -3,7 +3,7 @@ use napi_derive::napi;
 
 mod types;
 
-use types::{JsLiteParseConfig, JsParseResult, JsScreenshotResult, JsTextItem};
+use types::{JsLiteParseConfig, JsPageInput, JsParseResult, JsScreenshotResult, JsTextItem};
 
 /// Main LiteParse parser class.
 #[napi]
@@ -42,6 +42,20 @@ impl LiteParse {
             .await
             .map_err(|e| Error::from_reason(e.to_string()))?;
 
+        Ok(JsParseResult::from_rust(&result, &self.config))
+    }
+
+    /// Parse from pre-extracted pages, skipping PDFium text extraction.
+    ///
+    /// The caller supplies pages already populated with text items in viewport
+    /// space (top-left origin, 72 DPI). Runs only grid projection + the
+    /// configured output formatter, so it never loads PDFium. Use when an
+    /// external extractor owns text extraction (e.g. to keep its own
+    /// font-recovery pipeline).
+    #[napi]
+    pub fn parse_pages(&self, pages: Vec<JsPageInput>) -> Result<JsParseResult> {
+        let rust_pages: Vec<_> = pages.iter().map(JsPageInput::to_rust).collect();
+        let result = self.inner.parse_from_pages(rust_pages, Vec::new());
         Ok(JsParseResult::from_rust(&result, &self.config))
     }
 

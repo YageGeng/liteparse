@@ -1,14 +1,7 @@
 #!/usr/bin/env node
 
 import { program } from "commander";
-import {
-  LiteParse,
-  type LayoutBlock,
-  type LiteParseConfig,
-  type OutputFormat,
-  type ParseResult,
-  type ParsedPage,
-} from "./lib.js";
+import { LiteParse, type LiteParseConfig } from "./lib.js";
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { join, relative, parse as parsePath } from "node:path";
 
@@ -22,7 +15,20 @@ program
   .description("Parse a document and extract text")
   .argument("<file>", "Path to the document file")
   .option("-o, --output <file>", "Output file path")
-  .option("--format <format>", 'Output format: json|markdown|text (default: "text")')
+  .option("--format <format>", 'Output format: json|text|markdown (default: "text")')
+  .option(
+    "--image-mode <mode>",
+    "How to surface raster images in markdown: off|placeholder|embed (default: placeholder)",
+  )
+  .option(
+    "--image-output-dir <dir>",
+    "Directory to write embedded images to when --image-mode embed is set",
+  )
+  .option("--no-links", "Disable hyperlink extraction (emit plain anchor text)")
+  .option("--layout", "Enable YOLO document layout detection")
+  .option("--layout-confidence-threshold <n>", "Minimum layout detection confidence score", parseFloat)
+  .option("--layout-iou-threshold <n>", "IoU threshold for layout detection NMS", parseFloat)
+  .option("--layout-image-size <n>", "Square image size for layout detection", parseInt)
   .option("--ocr-server-url <url>", "HTTP OCR server URL")
   .option("--no-ocr", "Disable OCR")
   .option("--ocr-language <lang>", "OCR language (default: eng)")
@@ -50,7 +56,17 @@ program
       }
 
       // CLI options override config file
-      if (opts.format) config.outputFormat = parseOutputFormat(opts.format as string);
+      if (opts.format) config.outputFormat = opts.format as "json" | "text" | "markdown";
+      if (opts.imageMode)
+        config.imageMode = opts.imageMode as "off" | "placeholder" | "embed";
+      if (opts.links === false) config.extractLinks = false;
+      if (opts.layout) config.layoutEnabled = true;
+      if (opts.layoutConfidenceThreshold)
+        config.layoutConfidenceThreshold = opts.layoutConfidenceThreshold as number;
+      if (opts.layoutIouThreshold)
+        config.layoutIouThreshold = opts.layoutIouThreshold as number;
+      if (opts.layoutImageSize)
+        config.layoutImageSize = opts.layoutImageSize as number;
       if (opts.ocrServerUrl)
         config.ocrServerUrl = opts.ocrServerUrl as string;
       if (opts.ocr === false) config.ocrEnabled = false;
@@ -69,7 +85,36 @@ program
       const parser = new LiteParse(config);
       const result = await parser.parse(file);
 
-      const output = formatResult(result, config.outputFormat);
+      const output =
+        config.outputFormat === "json"
+          ? JSON.stringify(
+              {
+                pages: result.pages.map((p) => ({
+                  page: p.pageNum,
+                  width: p.width,
+                  height: p.height,
+                  text: p.text,
+                  textItems: p.textItems,
+                  layoutBlocks: p.layoutBlocks,
+                })),
+              },
+              null,
+              2,
+            )
+          : result.text;
+
+      if (opts.imageOutputDir && result.images.length > 0) {
+        const dir = opts.imageOutputDir as string;
+        mkdirSync(dir, { recursive: true });
+        for (const img of result.images) {
+          writeFileSync(join(dir, `image_${img.id}.${img.format}`), img.bytes);
+        }
+        if (!opts.quiet) {
+          console.error(
+            `[liteparse] wrote ${result.images.length} image(s) to ${dir}`,
+          );
+        }
+      }
 
       if (opts.output) {
         writeFileSync(opts.output as string, output, "utf-8");
@@ -161,8 +206,8 @@ program
     'Pages to screenshot (e.g., "1,3,5" or "1-5")',
   )
   .option("--dpi <dpi>", "Rendering DPI", parseFloat)
-  .option("--layout-confidence-threshold <n>", "Minimum layout confidence", parseFloat)
-  .option("--layout-iou-threshold <n>", "Layout NMS IoU threshold", parseFloat)
+  .option("--layout-confidence-threshold <n>", "Minimum layout detection confidence score", parseFloat)
+  .option("--layout-iou-threshold <n>", "IoU threshold for layout detection NMS", parseFloat)
   .option("--layout-image-size <n>", "Square image size for layout detection", parseInt)
   .option("--password <password>", "Password for encrypted documents")
   .option("-q, --quiet", "Suppress progress output")
@@ -181,15 +226,25 @@ program
         config.layoutImageSize = opts.layoutImageSize as number;
 
       const parser = new LiteParse(config);
-      const pageNumbers = opts.targetPages
-        ? parseTargetPages(opts.targetPages as string)
-        : undefined;
+
+      let pageNumbers: number[] | undefined;
+      if (opts.targetPages) {
+        pageNumbers = [];
+        for (const part of (opts.targetPages as string).split(",")) {
+          const trimmed = part.trim();
+          if (trimmed.includes("-")) {
+            const [start, end] = trimmed.split("-").map(Number);
+            for (let i = start; i <= end; i++) pageNumbers.push(i);
+          } else {
+            pageNumbers.push(Number(trimmed));
+          }
+        }
+      }
 
       const outputDir = opts.outputDir as string;
       mkdirSync(outputDir, { recursive: true });
 
       const results = await parser.layoutScreenshot(file, pageNumbers);
-
       for (const result of results) {
         const outputPath = join(outputDir, `page_${result.pageNum}.png`);
         writeFileSync(outputPath, result.imageBuffer);
@@ -212,10 +267,14 @@ program
   .description("Parse multiple documents in batch mode")
   .argument("<input-dir>", "Input directory")
   .argument("<output-dir>", "Output directory")
-  .option("--format <format>", 'Output format: json|markdown|text (default: "text")')
+  .option("--format <format>", 'Output format: json|text|markdown (default: "text")')
   .option("--no-ocr", "Disable OCR")
   .option("--ocr-language <lang>", "OCR language (default: eng)")
   .option("--ocr-server-url <url>", "HTTP OCR server URL")
+  .option("--layout", "Enable YOLO document layout detection")
+  .option("--layout-confidence-threshold <n>", "Minimum layout detection confidence score", parseFloat)
+  .option("--layout-iou-threshold <n>", "IoU threshold for layout detection NMS", parseFloat)
+  .option("--layout-image-size <n>", "Square image size for layout detection", parseInt)
   .option("--max-pages <n>", "Max pages to parse per file", parseInt)
   .option("--dpi <dpi>", "Rendering DPI", parseFloat)
   .option("--recursive", "Recursively search input directory")
@@ -231,12 +290,19 @@ program
     ) => {
       try {
         const config: Partial<LiteParseConfig> = {};
-        const format = parseOutputFormat((opts.format as string) ?? "text");
-        config.outputFormat = format;
+        const format = (opts.format as string) ?? "text";
+        config.outputFormat = format as "json" | "text" | "markdown";
         if (opts.ocr === false) config.ocrEnabled = false;
         if (opts.ocrLanguage) config.ocrLanguage = opts.ocrLanguage as string;
         if (opts.ocrServerUrl)
           config.ocrServerUrl = opts.ocrServerUrl as string;
+        if (opts.layout) config.layoutEnabled = true;
+        if (opts.layoutConfidenceThreshold)
+          config.layoutConfidenceThreshold = opts.layoutConfidenceThreshold as number;
+        if (opts.layoutIouThreshold)
+          config.layoutIouThreshold = opts.layoutIouThreshold as number;
+        if (opts.layoutImageSize)
+          config.layoutImageSize = opts.layoutImageSize as number;
         if (opts.maxPages) config.maxPages = opts.maxPages as number;
         if (opts.dpi) config.dpi = opts.dpi as number;
         if (opts.password) config.password = opts.password as string;
@@ -244,8 +310,7 @@ program
         if (opts.numWorkers) config.numWorkers = opts.numWorkers as number;
 
         const parser = new LiteParse(config);
-        const outExt =
-          format === "json" ? ".json" : format === "markdown" ? ".md" : ".txt";
+        const outExt = format === "json" ? ".json" : format === "markdown" ? ".md" : ".txt";
 
         mkdirSync(outputDir, { recursive: true });
 
@@ -289,7 +354,23 @@ program
 
           try {
             const result = await parser.parse(filePath);
-            const output = formatResult(result, format);
+            const output =
+              format === "json"
+                ? JSON.stringify(
+                    {
+                      pages: result.pages.map((p) => ({
+                        page: p.pageNum,
+                        width: p.width,
+                        height: p.height,
+                        text: p.text,
+                        textItems: p.textItems,
+                        layoutBlocks: p.layoutBlocks,
+                      })),
+                    },
+                    null,
+                    2,
+                  )
+                : result.text;
             writeFileSync(outPath, output, "utf-8");
             success++;
             if (!opts.quiet) {
@@ -327,103 +408,6 @@ const SUPPORTED_EXTENSIONS = new Set([
   ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".svg",
   ".txt", ".md", ".markdown", ".log",
 ]);
-
-function parseOutputFormat(format: string): OutputFormat {
-  const normalized = format.toLowerCase();
-  if (normalized === "json" || normalized === "text") return normalized;
-  if (normalized === "markdown" || normalized === "md") return "markdown";
-  throw new Error(
-    `unknown format '${format}', expected 'json', 'markdown', or 'text'`,
-  );
-}
-
-function parseTargetPages(value: string): number[] {
-  const pageNumbers: number[] = [];
-  for (const part of value.split(",")) {
-    const trimmed = part.trim();
-    if (!trimmed) continue;
-    if (trimmed.includes("-")) {
-      const [start, end] = trimmed.split("-").map(Number);
-      for (let i = start; i <= end; i++) pageNumbers.push(i);
-    } else {
-      pageNumbers.push(Number(trimmed));
-    }
-  }
-  return pageNumbers;
-}
-
-function formatResult(result: ParseResult, format: OutputFormat): string {
-  if (format === "json") {
-    return JSON.stringify(
-      {
-        pages: result.pages.map((p) => ({
-          page: p.pageNum,
-          width: p.width,
-          height: p.height,
-          text: p.text,
-          textItems: p.textItems,
-          layoutBlocks: p.layoutBlocks,
-        })),
-      },
-      null,
-      2,
-    );
-  }
-
-  if (format === "markdown") {
-    return formatMarkdown(result.pages);
-  }
-
-  return result.text;
-}
-
-function formatMarkdown(pages: ParsedPage[]): string {
-  return pages
-    .map(formatPageMarkdown)
-    .filter((page) => page.length > 0)
-    .join("\n\n");
-}
-
-function formatPageMarkdown(page: ParsedPage): string {
-  if (page.layoutBlocks.length === 0) return page.text.trim();
-  return page.layoutBlocks
-    .map(formatBlockMarkdown)
-    .filter((block) => block.length > 0)
-    .join("\n\n");
-}
-
-function formatBlockMarkdown(block: LayoutBlock): string {
-  const text = block.text.trim();
-  if (block.label === "Picture" && !text) return "![Picture](#)";
-  if (!text) return "";
-
-  switch (block.label) {
-    case "Title":
-      return `# ${oneLine(text)}`;
-    case "SectionHeader":
-      return `## ${oneLine(text)}`;
-    case "ListItem":
-      return text
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .map((line) => `- ${line}`)
-        .join("\n");
-    case "Formula":
-      return `$$\n${text}\n$$`;
-    case "Caption":
-    case "Footnote":
-      return `_${text}_`;
-    case "Picture":
-      return `![Picture](#)\n\n${text}`;
-    default:
-      return text;
-  }
-}
-
-function oneLine(text: string): string {
-  return text.split(/\s+/).filter(Boolean).join(" ");
-}
 
 function collectFiles(
   dir: string,

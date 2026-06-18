@@ -242,6 +242,19 @@ impl TextChar<'_> {
         if obj.is_null() { None } else { Some(obj) }
     }
 
+    /// Advance width of the ASCII space (char code 0x20) in this character's
+    /// font, expressed per em (i.e. for `font_size = 1.0`). Multiply by the
+    /// actual font size to get the space width in text-space points. Returns
+    /// `None` when the font or glyph is unavailable. Used to set a font-aware
+    /// threshold for detecting word boundaries when PDFium omits space glyphs.
+    pub fn font_space_width(&self) -> Option<f32> {
+        let obj = self.text_object()?;
+        let font = unsafe { crate::font::Font::from_text_object(obj)? };
+        font.glyph_width_from_char_code(0x20, 1.0)
+            .filter(|w| *w > 0.0)
+            .or_else(|| font.glyph_width(0x20, 1.0).filter(|w| *w > 0.0))
+    }
+
     /// Get stroke color (r, g, b, a).
     pub fn stroke_color(&self) -> Option<Color> {
         let mut r = 0u32;

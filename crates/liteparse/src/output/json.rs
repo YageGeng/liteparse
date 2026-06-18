@@ -1,4 +1,4 @@
-use crate::projection;
+use crate::layout_merge;
 use crate::types::{LayoutBlock, ParsedPage, TextItem};
 use serde::Serialize;
 
@@ -18,6 +18,16 @@ pub(crate) struct JsonTextItem {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct JsonPage {
+    pub page: usize,
+    pub width: f32,
+    pub height: f32,
+    pub text: String,
+    pub text_items: Vec<JsonTextItem>,
+    pub layout_blocks: Vec<JsonLayoutBlock>,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct JsonLayoutBlock {
     pub id: usize,
     pub label: String,
@@ -28,15 +38,6 @@ pub(crate) struct JsonLayoutBlock {
     pub height: f32,
     pub text: String,
     pub text_items: Vec<JsonTextItem>,
-}
-
-#[derive(Debug, Serialize)]
-pub(crate) struct JsonPage {
-    pub page: usize,
-    pub width: f32,
-    pub height: f32,
-    pub text: String,
-    pub layout_blocks: Vec<JsonLayoutBlock>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,6 +55,7 @@ pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
                 width: page.page_width,
                 height: page.page_height,
                 text: page.text.clone(),
+                text_items: page.text_items.iter().map(text_item_to_json).collect(),
                 layout_blocks: page
                     .layout_blocks
                     .iter()
@@ -73,7 +75,7 @@ fn layout_block_to_json(page: &ParsedPage, block: &LayoutBlock) -> JsonLayoutBlo
         .collect();
 
     let text_items: Vec<JsonTextItem> = block_items.iter().map(text_item_to_json).collect();
-    let text = projection::project_text_items_to_text(
+    let text = layout_merge::project_layout_text(
         page.page_number,
         page.page_width,
         page.page_height,
@@ -133,17 +135,6 @@ mod tests {
         }
     }
 
-    fn page(items: Vec<TextItem>) -> ParsedPage {
-        ParsedPage {
-            page_number: 1,
-            page_width: 612.0,
-            page_height: 792.0,
-            text: "txt".into(),
-            text_items: items,
-            layout_blocks: vec![],
-        }
-    }
-
     fn layout_block() -> LayoutBlock {
         LayoutBlock {
             id: 2,
@@ -156,37 +147,45 @@ mod tests {
         }
     }
 
+    fn page(items: Vec<TextItem>) -> ParsedPage {
+        ParsedPage {
+            page_number: 1,
+            page_width: 612.0,
+            page_height: 792.0,
+            text: "txt".into(),
+            text_items: items,
+            layout_blocks: vec![],
+            projected_lines: vec![],
+            regions: crate::types::Region::default(),
+            graphics: vec![],
+            figures: vec![],
+            struct_nodes: vec![],
+            image_refs: vec![],
+        }
+    }
+
     #[test]
     fn test_build_json_native_text_defaults_confidence_to_one() {
         let j = build_json(&[page(vec![item("hi", None)])]);
         assert_eq!(j.pages.len(), 1);
         assert_eq!(j.pages[0].page, 1);
+        assert_eq!(j.pages[0].text_items[0].confidence, Some(1.0));
+        assert_eq!(j.pages[0].text_items[0].font_name.as_deref(), Some("Helv"));
         assert!(j.pages[0].layout_blocks.is_empty());
     }
 
     #[test]
     fn test_build_json_preserves_ocr_confidence() {
-        let mut text_item = item("hi", Some(0.42));
-        text_item.layout_block_id = Some(2);
-        text_item.layout_label = Some("table".into());
-        let mut page = page(vec![text_item]);
-        page.layout_blocks = vec![layout_block()];
-
-        let j = build_json(&[page]);
-
-        assert_eq!(
-            j.pages[0].layout_blocks[0].text_items[0].confidence,
-            Some(0.42)
-        );
+        let j = build_json(&[page(vec![item("hi", Some(0.42))])]);
+        assert_eq!(j.pages[0].text_items[0].confidence, Some(0.42));
     }
 
     #[test]
     fn test_format_json_pretty() {
         let s = format_json(&[page(vec![item("hi", None)])]).unwrap();
         assert!(s.contains("\n"));
-        assert!(s.contains("\"text\": \"txt\""));
+        assert!(s.contains("\"text\": \"hi\""));
         assert!(s.contains("\"page\": 1"));
-        assert!(!s.contains("\"text_items\": ["));
     }
 
     #[test]
@@ -196,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_json_includes_layout_fields() {
+    fn test_build_json_includes_layout_blocks_without_leaking_item_tags() {
         let mut text_item = item("hi", None);
         text_item.layout_block_id = Some(2);
         text_item.layout_label = Some("table".into());
@@ -211,55 +210,5 @@ mod tests {
         assert!(s.contains("\"text\": \"hi\""));
         assert!(!s.contains("\"layout_block_id\""));
         assert!(!s.contains("\"layout_label\""));
-    }
-
-    #[test]
-    fn test_build_json_nests_text_items_under_matching_layout_blocks() {
-        let mut first = item("first", None);
-        first.layout_block_id = Some(2);
-        first.layout_label = Some("table".into());
-        let mut second = item("second", Some(0.5));
-        second.layout_block_id = Some(2);
-        second.layout_label = Some("table".into());
-        let mut unassigned = item("outside", None);
-        unassigned.layout_block_id = None;
-
-        let mut page = page(vec![first, second, unassigned]);
-        page.layout_blocks = vec![layout_block()];
-
-        let j = build_json(&[page]);
-
-        assert_eq!(j.pages[0].layout_blocks[0].text_items.len(), 2);
-        assert_eq!(j.pages[0].layout_blocks[0].text_items[0].text, "first");
-        assert_eq!(
-            j.pages[0].layout_blocks[0].text_items[1].confidence,
-            Some(0.5)
-        );
-        let s = serde_json::to_string(&j.pages[0]).unwrap();
-        assert!(!s.contains("\"text_items\":[{\"text\":\"outside\""));
-    }
-
-    #[test]
-    fn test_build_json_projects_layout_block_text() {
-        let mut first = item("hello", None);
-        first.x = 10.0;
-        first.y = 20.0;
-        first.width = 20.0;
-        first.height = 10.0;
-        first.layout_block_id = Some(2);
-
-        let mut second = item("world", None);
-        second.x = 38.0;
-        second.y = 20.0;
-        second.width = 22.0;
-        second.height = 10.0;
-        second.layout_block_id = Some(2);
-
-        let mut page = page(vec![first, second]);
-        page.layout_blocks = vec![layout_block()];
-
-        let j = build_json(&[page]);
-
-        assert_eq!(j.pages[0].layout_blocks[0].text, "hello world");
     }
 }

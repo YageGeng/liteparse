@@ -236,105 +236,9 @@
         word-break: normal;
       }
 
-      #output.markdown {
-        background: white;
-        color: var(--black);
-        font-family: var(--font-sans);
-        font-size: 0.95rem;
-        line-height: 1.65;
-        white-space: normal;
-      }
-
-      #output.markdown h1,
-      #output.markdown h2 {
-        line-height: 1.25;
-        margin: 0 0 0.75rem;
-      }
-
-      #output.markdown h1 {
-        font-size: 1.45rem;
-      }
-
-      #output.markdown h2 {
-        font-size: 1.15rem;
-        margin-top: 1.5rem;
-      }
-
-      #output.markdown p,
-      #output.markdown ul,
-      #output.markdown pre {
-        margin: 0 0 1rem;
-      }
-
-      #output.markdown ul {
-        padding-left: 1.25rem;
-      }
-
-      #output.markdown pre {
-        background: var(--off-white);
-        border: 1px solid var(--light-grey);
-        border-radius: 6px;
-        color: var(--black);
-        font-family: var(--font-mono);
-        overflow: auto;
-        padding: 0.75rem;
+      #output.wrap {
         white-space: pre-wrap;
-      }
-
-      #output.markdown em {
-        color: var(--dark-grey);
-      }
-
-      #output.markdown .md-image {
-        border: 1px dashed var(--light-grey);
-        border-radius: 6px;
-        color: var(--dark-grey);
-        font-family: var(--font-mono);
-        font-size: 0.8rem;
-        margin: 0 0 1rem;
-        padding: 1rem;
-        text-align: center;
-      }
-
-      .layout-preview {
-        display: none;
-        margin-bottom: 1rem;
-      }
-
-      .layout-preview.visible {
-        display: block;
-      }
-
-      .layout-preview h3 {
-        font-size: 0.9rem;
-        font-weight: 600;
-        margin-bottom: 0.75rem;
-      }
-
-      .layout-pages {
-        display: grid;
-        gap: 1rem;
-      }
-
-      .layout-page {
-        background: white;
-        border: 1px solid var(--light-grey);
-        border-radius: 8px;
-        overflow: hidden;
-      }
-
-      .layout-page-header {
-        border-bottom: 1px solid var(--light-grey);
-        color: var(--dark-grey);
-        font-family: var(--font-mono);
-        font-size: 0.75rem;
-        padding: 0.5rem 0.75rem;
-      }
-
-      .layout-page img {
-        display: block;
-        height: auto;
-        width: 100%;
+        word-break: break-word;
       }
 
       /* Stats bar */
@@ -541,18 +445,15 @@
       <div id="status"></div>
 
       <div class="output-container" id="output-container">
-        <div class="layout-preview" id="layout-preview">
-          <h3>Layout Preview</h3>
-          <div class="layout-pages" id="layout-pages"></div>
-        </div>
         <div class="controls">
           <label for="format-select">Output:</label>
           <select id="format-select">
-            <option value="text">Plain Text</option>
             <option value="markdown">Markdown</option>
+            <option value="text">Plain Text</option>
             <option value="json">JSON (with bounding boxes)</option>
           </select>
           <div class="spacer"></div>
+          <button id="wrap-btn">Wrap: Off</button>
           <button id="copy-btn">Copy</button>
         </div>
         <pre id="output"></pre>
@@ -568,23 +469,15 @@
 <span class="cmt">// Initialize the WASM module</span>
 <span class="kw">await</span> <span class="fn">init</span>();
 
-<span class="cmt">// Create one parser instance and reuse it across files</span>
-<span class="cmt">// Enable layout detection by setting layoutEnabled and tuning thresholds</span>
-<span class="kw">const</span> <span class="const">parser</span> = <span class="kw">new</span> <span class="fn">LiteParse</span>({
-  <span class="const">outputFormat</span>: <span class="str">"json"</span>,
-  <span class="const">layoutEnabled</span>: <span class="kw">true</span>,
-  <span class="const">layoutConfidenceThreshold</span>: <span class="const">0.25</span>,
-  <span class="const">layoutIouThreshold</span>: <span class="const">0.45</span>,
-  <span class="const">layoutImageSize</span>: <span class="const">1280</span>
-});
+<span class="cmt">// Create a parser instance (markdown output)</span>
+<span class="kw">const</span> <span class="const">parser</span> = <span class="kw">new</span> <span class="fn">LiteParse</span>({ <span class="const">outputFormat</span>: <span class="str">"markdown"</span> });
 
-<span class="cmt">// Parse PDF bytes into CLI-compatible JSON or Markdown</span>
+<span class="cmt">// Parse PDF bytes (Uint8Array from File, fetch, etc.)</span>
 <span class="kw">const</span> <span class="const">bytes</span> = <span class="kw">new</span> <span class="fn">Uint8Array</span>(<span class="kw">await</span> file.<span class="fn">arrayBuffer</span>());
-<span class="kw">const</span> <span class="const">json</span> = <span class="kw">await</span> parser.<span class="fn">parseJson</span>(<span class="const">bytes</span>);
-<span class="kw">const</span> <span class="const">markdown</span> = <span class="kw">await</span> parser.<span class="fn">parseMarkdown</span>(<span class="const">bytes</span>);
-<span class="kw">const</span> <span class="const">layoutImages</span> = <span class="kw">await</span> parser.<span class="fn">layoutScreenshots</span>(<span class="const">bytes</span>);
+<span class="kw">const</span> <span class="const">result</span> = <span class="kw">await</span> parser.<span class="fn">parse</span>(<span class="const">bytes</span>);
 
-console.<span class="fn">log</span>(<span class="const">json</span>); <span class="cmt">// same schema as the CLI JSON output</span></pre>
+console.<span class="fn">log</span>(<span class="const">result</span>.text);           <span class="cmt">// rendered markdown</span>
+console.<span class="fn">log</span>(<span class="const">result</span>.pages[<span class="const">0</span>].textItems); <span class="cmt">// items with bounding boxes</span></pre>
       </div>
     </main>
 
@@ -600,84 +493,36 @@ console.<span class="fn">log</span>(<span class="const">json</span>); <span clas
       const output = document.getElementById("output");
       const outputContainer = document.getElementById("output-container");
       const statsEl = document.getElementById("stats");
-      const layoutPreview = document.getElementById("layout-preview");
-      const layoutPages = document.getElementById("layout-pages");
       const dropZone = document.getElementById("drop-zone");
       const fileInput = document.getElementById("pdf-input");
       const formatSelect = document.getElementById("format-select");
       const copyBtn = document.getElementById("copy-btn");
+      const wrapBtn = document.getElementById("wrap-btn");
 
-      let lastResult = null;
-      let lastJsonOutput = "";
-      let lastMarkdownOutput = "";
-      let lastTextOutput = "";
-      let lastLayoutImageUrls = [];
-      let parser = null;
-      let isParsing = false;
+      let currentFile = null; // raw bytes of the loaded PDF
+      let currentName = "";
+      const resultCache = {}; // keyed by output format: "markdown" | "text" | "json"
 
       function setStatus(msg, type) {
         status.textContent = msg;
         status.className = type || "";
       }
 
-      // --- Load local WASM from workspace by default ---
+      // --- Load WASM from CDN ---
       setStatus("Loading WASM module...", "loading");
 
       let LiteParse;
-      let wasmSourceLabel = "";
-      const allowRemoteWasm = new URLSearchParams(window.location.search).get("remote") === "1";
-      const wasmSources = [
-        {
-          label: "local",
-          js: new URL("../packages/wasm/pkg/liteparse_wasm.js", window.location.href).href,
-          wasm: new URL("../packages/wasm/pkg/liteparse_wasm_bg.wasm", window.location.href).href,
-        },
-      ];
-      if (allowRemoteWasm) {
-        wasmSources.push({
-          label: "remote",
-          js: "https://cdn.jsdelivr.net/npm/@llamaindex/liteparse-wasm@2/pkg/liteparse_wasm.js",
-          wasm: "https://cdn.jsdelivr.net/npm/@llamaindex/liteparse-wasm@2/pkg/liteparse_wasm_bg.wasm",
-        });
-      }
-      for (const source of wasmSources) {
-        try {
-          const mod = await import(source.js);
-          await mod.default({ module_or_path: source.wasm });
-          LiteParse = mod.LiteParse;
-          wasmSourceLabel = source.label;
-          setStatus(`Ready (${source.label} WASM). Drop a PDF to parse.`, "success");
-          break;
-        } catch (err) {
-          console.error("Failed loading WASM source:", source, err);
-        }
-      }
-      if (!LiteParse) {
-        setStatus(
-          allowRemoteWasm
-            ? "Failed to load local/remote WASM module."
-            : "Failed to load local WASM module. Add ?remote=1 to allow CDN fallback.",
-          "error"
+      try {
+        const mod =
+          await import("https://cdn.jsdelivr.net/npm/@llamaindex/liteparse-wasm@2.1/pkg/liteparse_wasm.js");
+        await mod.default(
+          "https://cdn.jsdelivr.net/npm/@llamaindex/liteparse-wasm@2.1/pkg/liteparse_wasm_bg.wasm"
         );
-      }
-
-      // --- Parser ---
-      // Return the persistent parser instance used for every uploaded file.
-      function getParser() {
-        if (parser) return parser;
-
-        // CONTEXT: Burn's browser WebGPU backend registers a process-wide device server.
-        // Reusing the parser avoids unnecessary backend setup between uploaded files.
-        parser = new LiteParse({
-          ocrEnabled: false,
-          outputFormat: "json",
-          quiet: true,
-          layoutEnabled: true,
-          layoutConfidenceThreshold: 0.25,
-          layoutIouThreshold: 0.45,
-          layoutImageSize: 1280,
-        });
-        return parser;
+        LiteParse = mod.LiteParse;
+        setStatus("Ready. Drop a PDF to parse.", "success");
+      } catch (err) {
+        setStatus("Failed to load WASM module: " + err.message, "error");
+        console.error(err);
       }
 
       // --- Drag and drop ---
@@ -706,191 +551,72 @@ console.<span class="fn">log</span>(<span class="const">json</span>); <span clas
         if (file) parseFile(file);
       });
 
-      // --- Parse ---
+      // --- Load a file (store bytes, then render the selected format) ---
       async function parseFile(file) {
         if (!LiteParse) {
           setStatus("WASM module not loaded yet.", "error");
           return;
         }
-        if (isParsing) {
-          setStatus("A PDF is already being parsed.", "loading");
-          return;
-        }
-
-        isParsing = true;
-        setStatus(`Parsing "${file.name}"...`, "loading");
+        currentFile = new Uint8Array(await file.arrayBuffer());
+        currentName = file.name;
+        for (const k in resultCache) delete resultCache[k];
         outputContainer.classList.remove("visible");
-        clearLayoutPreview();
+        await renderOutput();
+      }
 
+      // Parse with a given output format, caching the result per format.
+      async function parseAs(format) {
+        if (resultCache[format]) return resultCache[format];
+        const t0 = performance.now();
+        const parser = new LiteParse({
+          ocrEnabled: false,
+          outputFormat: format,
+          quiet: true,
+        });
+        const result = await parser.parse(currentFile);
+        const elapsed = (performance.now() - t0) / 1000;
+        resultCache[format] = { result, elapsed };
+        return resultCache[format];
+      }
+
+      // --- Render output for the selected format ---
+      async function renderOutput() {
+        if (!currentFile) return;
+        const format = formatSelect.value;
+        setStatus(`Parsing "${currentName}"...`, "loading");
         try {
-          const t0 = performance.now();
-          const bytes = new Uint8Array(await file.arrayBuffer());
-          // Keep the JSON panel aligned with the Rust CLI formatter instead of JS object serialization.
-          const jsonOutput = await getParser().parseJson(bytes);
-          const markdownOutput = await getParser().parseMarkdown(bytes);
-          const layoutScreenshots = await getParser().layoutScreenshots(bytes);
-          const result = JSON.parse(jsonOutput);
-          const documentText = result.pages.map((page) => page.text || "").join("\n\n");
-          const elapsed = ((performance.now() - t0) / 1000).toFixed(2);
+          const { result, elapsed } = await parseAs(format);
 
-          lastResult = result;
-          lastJsonOutput = jsonOutput;
-          lastMarkdownOutput = markdownOutput;
-          lastTextOutput = documentText;
-          renderLayoutPreview(layoutScreenshots);
-          setStatus(`Parsed ${result.pages.length} page(s) in ${elapsed}s`, "success");
-          renderOutput();
+          if (format === "json") {
+            output.textContent = JSON.stringify(result, null, 2);
+          } else {
+            // For "markdown" and "text", result.text holds the rendered output.
+            output.textContent = result.text;
+          }
 
+          setStatus(`Parsed ${result.pages.length} page(s) in ${elapsed.toFixed(2)}s`, "success");
           statsEl.innerHTML = [
             `<span class="stat"><strong>${result.pages.length}</strong> pages</span>`,
-            `<span class="stat"><strong>${documentText.length.toLocaleString()}</strong> chars</span>`,
-            `<span class="stat"><strong>${elapsed}s</strong> elapsed</span>`,
-            `<span class="stat"><strong>${(bytes.length / 1024).toFixed(0)} KB</strong> file size</span>`,
-            `<span class="stat"><strong>${wasmSourceLabel}</strong> wasm</span>`,
+            `<span class="stat"><strong>${result.text.length.toLocaleString()}</strong> chars</span>`,
+            `<span class="stat"><strong>${elapsed.toFixed(2)}s</strong> elapsed</span>`,
+            `<span class="stat"><strong>${(currentFile.length / 1024).toFixed(0)} KB</strong> file size</span>`,
           ].join("");
-
           outputContainer.classList.add("visible");
         } catch (err) {
           setStatus("Parse error: " + err.toString(), "error");
           console.error(err);
-        } finally {
-          isParsing = false;
         }
-      }
-
-      function clearLayoutPreview() {
-        for (const url of lastLayoutImageUrls) {
-          URL.revokeObjectURL(url);
-        }
-        lastLayoutImageUrls = [];
-        layoutPages.innerHTML = "";
-        layoutPreview.classList.remove("visible");
-      }
-
-      function renderLayoutPreview(screenshots) {
-        clearLayoutPreview();
-        if (!screenshots || screenshots.length === 0) return;
-
-        const html = [];
-        for (const screenshot of screenshots) {
-          const blob = new Blob([screenshot.imageBytes], { type: "image/png" });
-          const url = URL.createObjectURL(blob);
-          lastLayoutImageUrls.push(url);
-          html.push(`
-            <figure class="layout-page">
-              <figcaption class="layout-page-header">
-                Page ${screenshot.pageNum} · ${screenshot.width}×${screenshot.height}
-              </figcaption>
-              <img src="${url}" alt="Layout detection result for page ${screenshot.pageNum}" />
-            </figure>
-          `);
-        }
-        layoutPages.innerHTML = html.join("");
-        layoutPreview.classList.add("visible");
-      }
-
-      // --- Render output ---
-      function renderOutput() {
-        if (!lastResult) return;
-        output.classList.toggle("markdown", formatSelect.value === "markdown");
-        if (formatSelect.value === "text") {
-          output.innerHTML = "";
-          output.textContent = lastTextOutput;
-        } else if (formatSelect.value === "markdown") {
-          output.innerHTML = renderMarkdown(lastMarkdownOutput);
-        } else {
-          output.innerHTML = "";
-          output.textContent = lastJsonOutput;
-        }
-      }
-
-      function renderMarkdown(markdown) {
-        const blocks = markdown.split(/\n{2,}/);
-        const html = [];
-        let inList = false;
-
-        const closeList = () => {
-          if (inList) {
-            html.push("</ul>");
-            inList = false;
-          }
-        };
-
-        for (const block of blocks) {
-          const trimmed = block.trim();
-          if (!trimmed) continue;
-
-          if (trimmed.startsWith("# ")) {
-            closeList();
-            html.push(`<h1>${escapeHtml(trimmed.slice(2).trim())}</h1>`);
-            continue;
-          }
-
-          if (trimmed.startsWith("## ")) {
-            closeList();
-            html.push(`<h2>${escapeHtml(trimmed.slice(3).trim())}</h2>`);
-            continue;
-          }
-
-          if (trimmed.startsWith("$$")) {
-            closeList();
-            const formula = trimmed.replace(/^\$\$\s*/, "").replace(/\s*\$\$$/, "");
-            html.push(`<pre><code>${escapeHtml(formula.trim())}</code></pre>`);
-            continue;
-          }
-
-          const imageMatch = trimmed.match(/^!\[([^\]]*)\]\(([^)]*)\)$/);
-          if (imageMatch) {
-            closeList();
-            const label = imageMatch[1].trim() || "Picture";
-            html.push(`<figure class="md-image">${escapeHtml(label)}</figure>`);
-            continue;
-          }
-
-          const lines = trimmed.split(/\r?\n/);
-          if (lines.every((line) => line.trim().startsWith("- "))) {
-            if (!inList) {
-              html.push("<ul>");
-              inList = true;
-            }
-            for (const line of lines) {
-              html.push(`<li>${escapeInlineMarkdown(line.trim().slice(2))}</li>`);
-            }
-            continue;
-          }
-
-          closeList();
-          html.push(`<p>${escapeInlineMarkdown(trimmed).replace(/\n/g, "<br>")}</p>`);
-        }
-
-        closeList();
-        return html.join("");
-      }
-
-      function escapeInlineMarkdown(value) {
-        const escaped = escapeHtml(value);
-        return escaped.replace(/^_(.*)_$/s, "<em>$1</em>");
-      }
-
-      function escapeHtml(value) {
-        return value
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;")
-          .replace(/'/g, "&#39;");
       }
 
       formatSelect.addEventListener("change", renderOutput);
 
+      wrapBtn.addEventListener("click", () => {
+        const wrapped = output.classList.toggle("wrap");
+        wrapBtn.textContent = wrapped ? "Wrap: On" : "Wrap: Off";
+      });
+
       copyBtn.addEventListener("click", () => {
-        const rawOutput =
-          formatSelect.value === "markdown"
-            ? lastMarkdownOutput
-            : formatSelect.value === "text"
-              ? lastTextOutput
-              : lastJsonOutput;
-        navigator.clipboard.writeText(rawOutput);
+        navigator.clipboard.writeText(output.textContent);
         copyBtn.textContent = "Copied!";
         setTimeout(() => {
           copyBtn.textContent = "Copy";

@@ -7,24 +7,18 @@
 
 mod wasi_stubs;
 
-use js_sys::{Array, Function, Object, Reflect, Uint8Array};
+use std::pin::Pin;
+
+use js_sys::{Function, Reflect, Uint8Array};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-use liteparse::config::{LiteParseConfig, OutputFormat};
-use liteparse::ocr::{OcrEngine, OcrFuture, OcrOptions, OcrResult};
-use liteparse::output::markdown;
+use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
+use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult};
 use liteparse::parser::LiteParse as CoreLiteParse;
-use liteparse::projection;
 use liteparse::search;
 use liteparse::types::{LayoutBlock, PdfInput, TextItem};
-
-#[wasm_bindgen]
-extern "C" {
-    #[wasm_bindgen(js_namespace = console, js_name = log)]
-    fn console_log(message: &str);
-}
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -51,13 +45,15 @@ struct JsLiteParseConfig {
     target_pages: Option<String>,
     dpi: Option<f32>,
     output_format: Option<String>,
-    preserve_very_small_text: Option<bool>,
-    password: Option<String>,
-    quiet: Option<bool>,
+    image_mode: Option<String>,
+    extract_links: Option<bool>,
     layout_enabled: Option<bool>,
     layout_confidence_threshold: Option<f32>,
     layout_iou_threshold: Option<f32>,
     layout_image_size: Option<u32>,
+    preserve_very_small_text: Option<bool>,
+    password: Option<String>,
+    quiet: Option<bool>,
 }
 
 impl JsLiteParseConfig {
@@ -87,24 +83,25 @@ impl JsLiteParseConfig {
         if let Some(v) = self.output_format {
             cfg.output_format = match v.as_str() {
                 "json" => OutputFormat::Json,
-                "markdown" | "md" => OutputFormat::Markdown,
                 "text" => OutputFormat::Text,
+                "markdown" | "md" => OutputFormat::Markdown,
                 other => {
                     return Err(JsError::new(&format!(
-                        "invalid outputFormat: {} (expected 'json', 'markdown', or 'text')",
+                        "invalid outputFormat: {} (expected 'json', 'text', or 'markdown')",
                         other
                     )));
                 }
             };
         }
-        if let Some(v) = self.preserve_very_small_text {
-            cfg.preserve_very_small_text = v;
+        if let Some(v) = self.image_mode {
+            cfg.image_mode = match v.as_str() {
+                "off" | "none" => ImageMode::Off,
+                "embed" => ImageMode::Embed,
+                _ => ImageMode::Placeholder,
+            };
         }
-        if self.password.is_some() {
-            cfg.password = self.password;
-        }
-        if let Some(v) = self.quiet {
-            cfg.quiet = v;
+        if let Some(v) = self.extract_links {
+            cfg.extract_links = v;
         }
         if let Some(v) = self.layout_enabled {
             cfg.layout_enabled = v;
@@ -117,6 +114,15 @@ impl JsLiteParseConfig {
         }
         if let Some(v) = self.layout_image_size {
             cfg.layout_image_size = v;
+        }
+        if let Some(v) = self.preserve_very_small_text {
+            cfg.preserve_very_small_text = v;
+        }
+        if self.password.is_some() {
+            cfg.password = self.password;
+        }
+        if let Some(v) = self.quiet {
+            cfg.quiet = v;
         }
         cfg.num_workers = 1;
         Ok(cfg)
@@ -133,16 +139,22 @@ impl JsLiteParseConfig {
             dpi: Some(cfg.dpi),
             output_format: Some(match cfg.output_format {
                 OutputFormat::Json => "json".into(),
-                OutputFormat::Markdown => "markdown".into(),
                 OutputFormat::Text => "text".into(),
+                OutputFormat::Markdown => "markdown".into(),
             }),
-            preserve_very_small_text: Some(cfg.preserve_very_small_text),
-            password: cfg.password.clone(),
-            quiet: Some(cfg.quiet),
+            image_mode: Some(match cfg.image_mode {
+                ImageMode::Off => "off".into(),
+                ImageMode::Placeholder => "placeholder".into(),
+                ImageMode::Embed => "embed".into(),
+            }),
+            extract_links: Some(cfg.extract_links),
             layout_enabled: Some(cfg.layout_enabled),
             layout_confidence_threshold: Some(cfg.layout_confidence_threshold),
             layout_iou_threshold: Some(cfg.layout_iou_threshold),
             layout_image_size: Some(cfg.layout_image_size),
+            preserve_very_small_text: Some(cfg.preserve_very_small_text),
+            password: cfg.password.clone(),
+            quiet: Some(cfg.quiet),
         }
     }
 }
@@ -172,7 +184,6 @@ struct JsTextItem<'a> {
 }
 
 impl<'a> JsTextItem<'a> {
-    /// Create a JS-facing text item from a core text item.
     fn from_rust(item: &'a TextItem) -> Self {
         Self {
             text: &item.text,
@@ -204,7 +215,6 @@ struct JsLayoutBlock<'a> {
 }
 
 impl<'a> JsLayoutBlock<'a> {
-    /// Create a JS-facing layout block with the text items assigned to it.
     fn from_rust(
         block: &'a LayoutBlock,
         page_number: usize,
@@ -220,7 +230,7 @@ impl<'a> JsLayoutBlock<'a> {
             .iter()
             .map(|item| JsTextItem::from_rust(item))
             .collect();
-        let text = projection::project_text_items_to_text(
+        let text = liteparse::layout_merge::project_layout_text(
             page_number,
             page_width,
             page_height,
@@ -259,6 +269,19 @@ struct JsParsedPage<'a> {
 struct JsParseResult<'a> {
     pages: Vec<JsParsedPage<'a>>,
     text: &'a str,
+    images: Vec<JsExtractedImage<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsExtractedImage<'a> {
+    id: &'a str,
+    page: u32,
+    format: &'a str,
+    /// Serialized as a JS `number[]`. Callers that want a Uint8Array can
+    /// wrap with `new Uint8Array(image.bytes)`. (Could be upgraded to a real
+    /// Uint8Array later by switching to a hand-rolled to_value path.)
+    bytes: &'a [u8],
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +318,12 @@ impl OcrEngine for JsOcrEngine {
         width: u32,
         height: u32,
         options: &'b OcrOptions,
-    ) -> OcrFuture<'a> {
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Vec<OcrResult>, Box<dyn std::error::Error + Send + Sync>>>
+                + '_,
+        >,
+    > {
         // Copy bytes into a JS Uint8Array up-front (must happen on the
         // current thread anyway in wasm).
         let arr = Uint8Array::new_with_length(image_data.len() as u32);
@@ -363,61 +391,6 @@ pub struct LiteParse {
 
 #[wasm_bindgen]
 impl LiteParse {
-    /// Return the compiled layout backend name for this Wasm package.
-    fn compiled_layout_backend() -> &'static str {
-        #[cfg(feature = "layout-yolo-webgpu")]
-        {
-            "webgpu"
-        }
-        #[cfg(all(not(feature = "layout-yolo-webgpu"), feature = "layout-yolo"))]
-        {
-            "ndarray"
-        }
-        #[cfg(not(any(feature = "layout-yolo-webgpu", feature = "layout-yolo")))]
-        {
-            "none"
-        }
-    }
-
-    /// Return whether this Wasm package was compiled with any YOLO layout feature.
-    fn has_compiled_layout() -> bool {
-        cfg!(any(feature = "layout-yolo-webgpu", feature = "layout-yolo"))
-    }
-
-    /// Write one LiteParse diagnostic line to the browser console.
-    fn log_diagnostic(message: &str) {
-        console_log(message);
-    }
-
-    /// Write the compiled layout backend and runtime layout setting to the browser console.
-    fn log_layout_state(stage: &str, config: &LiteParseConfig) {
-        Self::log_diagnostic(&format!(
-            "[liteparse-wasm] {stage}: yoloCompiled={}, yoloBackend={}, layoutEnabled={}, confidenceThreshold={}, iouThreshold={}, imageSize={}",
-            Self::has_compiled_layout(),
-            Self::compiled_layout_backend(),
-            config.layout_enabled,
-            config.layout_confidence_threshold,
-            config.layout_iou_threshold,
-            config.layout_image_size,
-        ));
-    }
-
-    /// Format a parse result with the same JSON formatter used by the CLI.
-    fn format_cli_json(result: &liteparse::ParseResult) -> Result<String, serde_json::Error> {
-        liteparse::output::json::format_json(&result.pages)
-    }
-
-    /// Format a parse result with the same Markdown formatter used by the CLI.
-    fn format_cli_markdown(result: &liteparse::ParseResult) -> String {
-        markdown::format_markdown(&result.pages)
-    }
-
-    fn set_object_property(obj: &Object, key: &str, value: &JsValue) -> Result<(), JsError> {
-        Reflect::set(obj, &JsValue::from_str(key), value)
-            .map(|_| ())
-            .map_err(|_| JsError::new("serialize layout screenshot result failed"))
-    }
-
     /// Construct a new parser. `config` is a JS object (all fields optional).
     /// If `config.ocrEngine` is present, it is wired up as the OCR backend.
     #[wasm_bindgen(constructor)]
@@ -441,7 +414,6 @@ impl LiteParse {
         if let Some(js_engine) = ocr_engine_js {
             parser = parser.with_ocr_engine(std::sync::Arc::new(JsOcrEngine::new(js_engine)));
         }
-        Self::log_layout_state("new", &core_cfg);
         Ok(LiteParse {
             inner: parser,
             config: core_cfg,
@@ -458,23 +430,11 @@ impl LiteParse {
 
     /// Parse PDF bytes. Returns `Promise<ParseResult>`.
     pub async fn parse(&self, data: Vec<u8>) -> Result<JsValue, JsError> {
-        Self::log_layout_state("parse:start", &self.config);
         let result = self
             .inner
             .parse_input(PdfInput::Bytes(data))
             .await
             .map_err(|e| JsError::new(&format!("parse failed: {}", e)))?;
-        let page_layout_counts = result
-            .pages
-            .iter()
-            .map(|page| page.layout_blocks.len().to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        Self::log_diagnostic(&format!(
-            "[liteparse-wasm] parse:done pages={}, layoutBlocksPerPage=[{}]",
-            result.pages.len(),
-            page_layout_counts,
-        ));
 
         let js_pages: Vec<JsParsedPage<'_>> = result
             .pages
@@ -488,9 +448,9 @@ impl LiteParse {
                 layout_blocks: p
                     .layout_blocks
                     .iter()
-                    .map(|b| {
+                    .map(|block| {
                         JsLayoutBlock::from_rust(
-                            b,
+                            block,
                             p.page_number,
                             p.page_width,
                             p.page_height,
@@ -501,75 +461,24 @@ impl LiteParse {
             })
             .collect();
 
+        let js_images: Vec<JsExtractedImage> = result
+            .images
+            .iter()
+            .map(|img| JsExtractedImage {
+                id: &img.id,
+                page: img.page,
+                format: &img.format,
+                bytes: &img.bytes,
+            })
+            .collect();
         let js_result = JsParseResult {
             pages: js_pages,
             text: &result.text,
+            images: js_images,
         };
 
         serde_wasm_bindgen::to_value(&js_result)
             .map_err(|e| JsError::new(&format!("serialize result failed: {}", e)))
-    }
-
-    /// Parse PDF bytes and return the same JSON string produced by the CLI JSON output.
-    #[wasm_bindgen(js_name = parseJson)]
-    pub async fn parse_json(&self, data: Vec<u8>) -> Result<String, JsError> {
-        Self::log_layout_state("parseJson:start", &self.config);
-        let result = self
-            .inner
-            .parse_input(PdfInput::Bytes(data))
-            .await
-            .map_err(|e| JsError::new(&format!("parse failed: {}", e)))?;
-        let page_layout_counts = result
-            .pages
-            .iter()
-            .map(|page| page.layout_blocks.len().to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        Self::log_diagnostic(&format!(
-            "[liteparse-wasm] parseJson:done pages={}, layoutBlocksPerPage=[{}]",
-            result.pages.len(),
-            page_layout_counts,
-        ));
-
-        Self::format_cli_json(&result)
-            .map_err(|e| JsError::new(&format!("serialize CLI JSON failed: {}", e)))
-    }
-
-    /// Parse PDF bytes and return the same Markdown string produced by the CLI Markdown output.
-    #[wasm_bindgen(js_name = parseMarkdown)]
-    pub async fn parse_markdown(&self, data: Vec<u8>) -> Result<String, JsError> {
-        Self::log_layout_state("parseMarkdown:start", &self.config);
-        let result = self
-            .inner
-            .parse_input(PdfInput::Bytes(data))
-            .await
-            .map_err(|e| JsError::new(&format!("parse failed: {}", e)))?;
-        Ok(Self::format_cli_markdown(&result))
-    }
-
-    /// Parse PDF bytes and return PNG screenshots annotated with detected layout boxes.
-    #[wasm_bindgen(js_name = layoutScreenshots)]
-    pub async fn layout_screenshots(&self, data: Vec<u8>) -> Result<JsValue, JsError> {
-        Self::log_layout_state("layoutScreenshots:start", &self.config);
-        let results = self
-            .inner
-            .layout_screenshot_input(PdfInput::Bytes(data), None)
-            .await
-            .map_err(|e| JsError::new(&format!("layout screenshot failed: {}", e)))?;
-
-        let array = Array::new();
-        for result in results {
-            let obj = Object::new();
-            Self::set_object_property(&obj, "pageNum", &JsValue::from_f64(result.page_num as f64))?;
-            Self::set_object_property(&obj, "width", &JsValue::from_f64(result.width as f64))?;
-            Self::set_object_property(&obj, "height", &JsValue::from_f64(result.height as f64))?;
-            let bytes = Uint8Array::new_with_length(result.image_bytes.len() as u32);
-            bytes.copy_from(&result.image_bytes);
-            Self::set_object_property(&obj, "imageBytes", &bytes)?;
-            array.push(&obj);
-        }
-
-        Ok(array.into())
     }
 }
 
@@ -648,80 +557,4 @@ pub fn search_items(items: JsValue, options: JsValue) -> Result<JsValue, JsError
 
     serde_wasm_bindgen::to_value(&js_results)
         .map_err(|e| JsError::new(&format!("serialize results failed: {}", e)))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Ensures the Wasm JSON path uses the same snake_case schema as the CLI formatter.
-    #[test]
-    fn cli_json_formatter_uses_cli_layout_schema() {
-        let mut text_item = TextItem {
-            text: "hello".to_string(),
-            x: 1.0,
-            y: 2.0,
-            width: 3.0,
-            height: 4.0,
-            layout_block_id: Some(9),
-            layout_label: Some("Text".to_string()),
-            ..Default::default()
-        };
-        text_item.confidence = Some(0.8);
-        let result = liteparse::ParseResult {
-            pages: vec![liteparse::types::ParsedPage {
-                page_number: 1,
-                page_width: 612.0,
-                page_height: 792.0,
-                text: "hello".to_string(),
-                text_items: vec![text_item],
-                layout_blocks: vec![LayoutBlock {
-                    id: 9,
-                    label: "Text".to_string(),
-                    confidence: 0.9,
-                    x: 1.0,
-                    y: 2.0,
-                    width: 3.0,
-                    height: 4.0,
-                }],
-            }],
-            text: "hello".to_string(),
-        };
-
-        let json = LiteParse::format_cli_json(&result).expect("CLI JSON should serialize");
-
-        assert!(json.contains("\"layout_blocks\""));
-        assert!(!json.contains("\"layoutBlocks\""));
-    }
-
-    /// Ensures layout blocks expose the text items assigned to that block.
-    #[test]
-    fn js_layout_block_serializes_nested_text_items() {
-        let block = JsLayoutBlock {
-            id: 7,
-            label: "Text",
-            confidence: 0.9,
-            x: 1.0,
-            y: 2.0,
-            width: 3.0,
-            height: 4.0,
-            text: "hello".to_string(),
-            text_items: vec![JsTextItem {
-                text: "hello",
-                x: 1.0,
-                y: 2.0,
-                width: 3.0,
-                height: 4.0,
-                font_name: None,
-                font_size: None,
-                confidence: None,
-                layout_block_id: Some(7),
-                layout_label: Some("Text"),
-            }],
-        };
-
-        let value = serde_json::to_value(&block).expect("layout block should serialize");
-
-        assert_eq!(value["textItems"][0]["text"], "hello");
-    }
 }

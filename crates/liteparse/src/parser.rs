@@ -3,6 +3,7 @@ use crate::config::{LiteParseConfig, parse_target_pages};
 use crate::conversion;
 use crate::error::LiteParseError;
 use crate::extract;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::layout_annotate;
 use crate::layout_merge;
 #[cfg(any(
@@ -18,10 +19,20 @@ use crate::ocr::http_simple::HttpOcrEngine;
 #[cfg(feature = "tesseract")]
 use crate::ocr::tesseract::TesseractOcrEngine;
 use crate::ocr_merge;
+use crate::output::markdown;
 use crate::projection;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::render;
-use crate::types::{ParsedPage, PdfInput};
-use pdfium::Library;
+use crate::types::{ExtractedImage, LayoutBlock, OutlineTarget, Page, ParsedPage, PdfInput};
+use pdfium::{Document, Library};
+
+#[cfg(not(any(
+    feature = "layout-yolo",
+    feature = "layout-yolo-metal",
+    feature = "layout-yolo-vulkan",
+    feature = "layout-yolo-webgpu"
+)))]
+struct LayoutDetector;
 
 /// Result of parsing a document.
 pub struct ParseResult {
@@ -29,6 +40,14 @@ pub struct ParseResult {
     pub pages: Vec<ParsedPage>,
     /// Full document text, concatenated from all pages.
     pub text: String,
+    /// Document outline (bookmarks) when present. Used by the markdown
+    /// emitter as a high-priority heading source on untagged PDFs.
+    pub outline: Vec<OutlineTarget>,
+    /// Raster images extracted from the document. Empty unless the parser
+    /// was configured with `ImageMode::Embed`. Each entry carries the same
+    /// `id` the markdown emitter referenced in `![](image_{id}.png)`, so the
+    /// caller can match them up without parsing markdown.
+    pub images: Vec<ExtractedImage>,
 }
 
 /// Result of rendering a single page screenshot.
@@ -120,424 +139,179 @@ impl LiteParse {
             .transpose()
             .map_err(|e| format!("invalid --target-pages: {}", e))?;
 
+        // Extract text (and pre-render OCR pages in one PDF load when OCR is on).
+        // The PDFium lock is acquired for this entire critical section and
+        // released before any `.await` below — OCR (network / CPU) and grid
+        // projection (pure Rust) do not touch PDFium, so they can run
+        // concurrently with other `LiteParse` calls.
         let password = self.config.password.as_deref();
-        let page_numbers = {
+        let render_images = matches!(self.config.image_mode, crate::config::ImageMode::Embed);
+        let layout_detector = self.create_layout_detector().await?;
+        let (pages, ocr_rendered, layout_rendered, outline, images) = {
             let lib = Library::init();
             let document = extract::load_document_from_input(&lib, &validated_input, password)?;
-            let page_count = document.page_count() as u32;
-            let mut page_numbers: Vec<u32> = (1..=page_count)
-                .filter(|page_number| {
-                    target_pages
-                        .as_ref()
-                        .is_none_or(|targets| targets.contains(page_number))
-                })
-                .take(self.config.max_pages)
-                .collect();
-            page_numbers.sort_unstable();
-            page_numbers
-        };
-
-        let ocr_engine: Option<std::sync::Arc<dyn OcrEngine>> = if self.config.ocr_enabled {
-            Some(self.resolve_ocr_engine()?)
-        } else {
-            None
-        };
-
-        #[cfg(all(target_arch = "wasm32", feature = "layout-yolo-webgpu"))]
-        let layout_detector = LayoutDetector::from_config_async(&self.config).await?;
-
-        #[cfg(all(
-            not(all(target_arch = "wasm32", feature = "layout-yolo-webgpu")),
-            any(
-                feature = "layout-yolo",
-                feature = "layout-yolo-metal",
-                feature = "layout-yolo-vulkan",
-                feature = "layout-yolo-webgpu"
-            )
-        ))]
-        let layout_detector = LayoutDetector::from_config(&self.config)?;
-
-        #[cfg(not(any(
-            feature = "layout-yolo",
-            feature = "layout-yolo-metal",
-            feature = "layout-yolo-vulkan",
-            feature = "layout-yolo-webgpu"
-        )))]
-        if self.config.layout_enabled {
-            return Err(LiteParseError::Config(
-                "layout detection requires a YOLO layout feature".into(),
+            let outline = extract::extract_outline(&document);
+            let (pages, images) = extract::extract_pages_and_images(
+                &document,
+                target_pages.as_deref(),
+                self.config.max_pages,
+                render_images,
+                self.config.extract_links
+                    && self.config.output_format == crate::config::OutputFormat::Markdown,
+            )?;
+            let t_extract = web_time::Instant::now();
+            log(&format!(
+                "[liteparse] extract: {:.1}ms ({} pages)",
+                t_extract.duration_since(t0).as_secs_f64() * 1000.0,
+                pages.len()
             ));
-        }
-
-        let mut parsed_pages = Vec::with_capacity(page_numbers.len());
-
-        for page_number in page_numbers {
-            let page_start = web_time::Instant::now();
-            let page_index = page_number as i32 - 1;
-
-            let (mut page, ocr_rendered, layout_rendered_for_detection) = {
-                let lib = Library::init();
-                let document = extract::load_document_from_input(&lib, &validated_input, password)?;
-                let page = extract::extract_page_from_document(&document, page_index)?;
-                let after_extract = web_time::Instant::now();
+            let rendered = if self.config.ocr_enabled {
+                let r = ocr_merge::render_pages_for_ocr(&document, &pages, self.config.dpi)?;
                 log(&format!(
-                    "[liteparse] page {} extract: {:.1}ms, items={}",
-                    page_number,
-                    after_extract.duration_since(page_start).as_secs_f64() * 1000.0,
-                    page.text_items.len()
+                    "[liteparse] ocr render: {:.1}ms ({} pages)",
+                    web_time::Instant::now()
+                        .duration_since(t_extract)
+                        .as_secs_f64()
+                        * 1000.0,
+                    r.len()
                 ));
-
-                let ocr_rendered = if self.config.ocr_enabled {
-                    ocr_merge::render_pages_for_ocr(
-                        &document,
-                        std::slice::from_ref(&page),
-                        self.config.dpi,
-                    )?
-                } else {
-                    Vec::new()
-                };
-
-                #[cfg(any(
-                    feature = "layout-yolo",
-                    feature = "layout-yolo-metal",
-                    feature = "layout-yolo-vulkan",
-                    feature = "layout-yolo-webgpu"
-                ))]
-                let layout_rendered = if self.config.layout_enabled {
-                    if let Some(rendered) = ocr_rendered.first() {
-                        Some(RenderedLayoutPage::new(
-                            rendered.rgb_bytes.clone(),
-                            rendered.width,
-                            rendered.height,
-                            page.page_width,
-                            page.page_height,
-                        ))
-                    } else {
-                        let page_obj = document.page(page_index)?;
-                        let bitmap = page_obj.render(self.config.dpi)?;
-                        Some(RenderedLayoutPage::new(
-                            bitmap.to_rgb(),
-                            bitmap.width() as u32,
-                            bitmap.height() as u32,
-                            page.page_width,
-                            page.page_height,
-                        ))
-                    }
-                } else {
-                    None
-                };
-
-                #[cfg(not(any(
-                    feature = "layout-yolo",
-                    feature = "layout-yolo-metal",
-                    feature = "layout-yolo-vulkan",
-                    feature = "layout-yolo-webgpu"
-                )))]
-                let layout_rendered: Option<()> = None;
-
-                (page, ocr_rendered, layout_rendered)
-            };
-
-            let layout_started = web_time::Instant::now();
-            #[cfg(not(any(
-                feature = "layout-yolo",
-                feature = "layout-yolo-metal",
-                feature = "layout-yolo-vulkan",
-                feature = "layout-yolo-webgpu"
-            )))]
-            let _ = layout_rendered_for_detection;
-
-            #[cfg(all(
-                not(target_arch = "wasm32"),
-                any(
-                    feature = "layout-yolo",
-                    feature = "layout-yolo-metal",
-                    feature = "layout-yolo-vulkan",
-                    feature = "layout-yolo-webgpu"
-                )
-            ))]
-            let layout_handle = if let (Some(detector), Some(rendered)) = (
-                layout_detector.clone(),
-                layout_rendered_for_detection.clone(),
-            ) {
-                let dpi = self.config.dpi;
-                Some(tokio::task::spawn_blocking(move || {
-                    detector.detect_rendered(rendered, dpi)
-                }))
+                r
             } else {
-                None
+                Vec::new()
             };
+            let layout_rendered = self.render_pages_for_layout(
+                &document,
+                &pages,
+                &rendered,
+                layout_detector.is_some(),
+            )?;
+            // `lib` is dropped here, releasing the PDFium lock.
+            (pages, rendered, layout_rendered, outline, images)
+        };
+        let mut pages = pages;
+        let t1 = web_time::Instant::now();
 
-            #[cfg(not(any(
-                feature = "layout-yolo",
-                feature = "layout-yolo-metal",
-                feature = "layout-yolo-vulkan",
-                feature = "layout-yolo-webgpu"
-            )))]
-            let layout_handle: Option<
-                tokio::task::JoinHandle<Result<Vec<crate::types::LayoutBlock>, LiteParseError>>,
-            > = None;
-
-            let ocr_started = web_time::Instant::now();
-            if let Some(engine) = ocr_engine.clone() {
-                if ocr_rendered.is_empty() {
-                    log(&format!(
-                        "[liteparse] page {} ocr: 0.0ms, skipped",
-                        page_number
-                    ));
-                } else {
-                    let mut one_page = vec![page];
-                    ocr_merge::ocr_and_merge_rendered(
-                        &mut one_page,
-                        ocr_rendered,
-                        self.config.dpi,
-                        engine,
-                        &self.config.ocr_language,
-                        self.config.num_workers,
-                    )
-                    .await?;
-                    page = one_page.remove(0);
-                    log(&format!(
-                        "[liteparse] page {} ocr: {:.1}ms",
-                        page_number,
-                        web_time::Instant::now()
-                            .duration_since(ocr_started)
-                            .as_secs_f64()
-                            * 1000.0
-                    ));
-                }
+        // OCR pass
+        if self.config.ocr_enabled {
+            let engine: std::sync::Arc<dyn OcrEngine> = if let Some(e) =
+                self.ocr_engine_override.clone()
+            {
+                e
             } else {
-                log(&format!(
-                    "[liteparse] page {} ocr: 0.0ms, disabled",
-                    page_number
-                ));
-            }
-
-            #[cfg(all(target_arch = "wasm32", feature = "layout-yolo-webgpu"))]
-            let layout_blocks = if let (Some(detector), Some(rendered)) = (
-                layout_detector.clone(),
-                layout_rendered_for_detection.clone(),
-            ) {
-                match detector
-                    .detect_rendered_async(rendered, self.config.dpi)
-                    .await
+                #[cfg(not(target_arch = "wasm32"))]
                 {
-                    Ok(blocks) => {
-                        log(&format!(
-                            "[liteparse] page {} layout: {:.1}ms, blocks={}",
-                            page_number,
-                            web_time::Instant::now()
-                                .duration_since(layout_started)
-                                .as_secs_f64()
-                                * 1000.0,
-                            blocks.len()
-                        ));
-                        blocks
-                    }
-                    Err(e) => {
-                        return Err(LiteParseError::Other(format!(
-                            "layout detection failed on page {}: {}",
-                            page_number, e
-                        )));
-                    }
-                }
-            } else {
-                log(&format!(
-                    "[liteparse] page {} layout: 0.0ms, {}",
-                    page_number,
-                    if self.config.layout_enabled {
-                        "unavailable"
+                    if let Some(ref url) = self.config.ocr_server_url {
+                        std::sync::Arc::new(HttpOcrEngine::with_headers(
+                            url.clone(),
+                            self.config.ocr_server_headers.clone(),
+                        ))
                     } else {
-                        "disabled"
-                    }
-                ));
-                Vec::new()
-            };
-
-            #[cfg(all(
-                target_arch = "wasm32",
-                not(feature = "layout-yolo-webgpu"),
-                any(
-                    feature = "layout-yolo",
-                    feature = "layout-yolo-metal",
-                    feature = "layout-yolo-vulkan"
-                )
-            ))]
-            let layout_blocks = if let (Some(detector), Some(rendered)) = (
-                layout_detector.clone(),
-                layout_rendered_for_detection.clone(),
-            ) {
-                match detector.detect_rendered(rendered, self.config.dpi) {
-                    Ok(blocks) => {
-                        log(&format!(
-                            "[liteparse] page {} layout: {:.1}ms, blocks={}",
-                            page_number,
-                            web_time::Instant::now()
-                                .duration_since(layout_started)
-                                .as_secs_f64()
-                                * 1000.0,
-                            blocks.len()
-                        ));
-                        blocks
-                    }
-                    Err(e) => {
-                        return Err(LiteParseError::Other(format!(
-                            "layout detection failed on page {}: {}",
-                            page_number, e
-                        )));
-                    }
-                }
-            } else {
-                log(&format!(
-                    "[liteparse] page {} layout: 0.0ms, {}",
-                    page_number,
-                    if self.config.layout_enabled {
-                        "unavailable"
-                    } else {
-                        "disabled"
-                    }
-                ));
-                Vec::new()
-            };
-
-            #[cfg(not(all(
-                target_arch = "wasm32",
-                any(
-                    feature = "layout-yolo",
-                    feature = "layout-yolo-metal",
-                    feature = "layout-yolo-vulkan",
-                    feature = "layout-yolo-webgpu"
-                )
-            )))]
-            let layout_blocks = match layout_handle {
-                Some(handle) => match handle.await {
-                    Ok(Ok(blocks)) => {
-                        log(&format!(
-                            "[liteparse] page {} layout: {:.1}ms, blocks={}",
-                            page_number,
-                            web_time::Instant::now()
-                                .duration_since(layout_started)
-                                .as_secs_f64()
-                                * 1000.0,
-                            blocks.len()
-                        ));
-                        blocks
-                    }
-                    Ok(Err(e)) => {
-                        return Err(LiteParseError::Other(format!(
-                            "layout detection failed on page {}: {}",
-                            page_number, e
-                        )));
-                    }
-                    Err(e) => {
-                        return Err(LiteParseError::Other(format!(
-                            "layout detection task failed on page {}: {}",
-                            page_number, e
-                        )));
-                    }
-                },
-                None => {
-                    log(&format!(
-                        "[liteparse] page {} layout: 0.0ms, {}",
-                        page_number,
-                        if self.config.layout_enabled {
-                            "unavailable"
-                        } else {
-                            "disabled"
+                        #[cfg(feature = "tesseract")]
+                        {
+                            std::sync::Arc::new(TesseractOcrEngine::new(
+                                self.config.tessdata_path.clone(),
+                            ))
                         }
-                    ));
-                    Vec::new()
+                        #[cfg(not(feature = "tesseract"))]
+                        {
+                            return Err("OCR enabled but no --ocr-server-url provided and tesseract feature is disabled".into());
+                        }
+                    }
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    return Err(
+                        "OCR enabled but no `ocrEngine` callback was provided (WASM builds have no built-in OCR engine)".into(),
+                    );
                 }
             };
-
-            let mut parsed_page = projection::project_pages_to_grid(vec![page])
-                .into_iter()
-                .next()
-                .ok_or_else(|| LiteParseError::Other("page projection produced no page".into()))?;
-            parsed_page.layout_blocks = layout_blocks;
-            layout_merge::assign_text_items_to_layout_blocks(
-                &mut parsed_page.text_items,
-                &parsed_page.layout_blocks,
-            );
-            layout_merge::compact_layout_blocks(
-                &mut parsed_page.layout_blocks,
-                &mut parsed_page.text_items,
-            );
-            // The initial page text is produced before layout assignment, so it
-            // only knows about item-level geometry. Once layout blocks are
-            // available, rebuild the plain text from those blocks so the
-            // detected reading order affects user-facing text output too.
-            if let Some(layout_text) = parsed_page.rebuild_text_in_layout_order() {
-                parsed_page.text = layout_text;
-            }
-            let assigned = parsed_page
-                .text_items
-                .iter()
-                .filter(|item| item.layout_block_id.is_some())
-                .count();
-            log(&format!(
-                "[liteparse] page {} merge: text_items={}, assigned={}",
-                page_number,
-                parsed_page.text_items.len(),
-                assigned
-            ));
-            log(&format!(
-                "[liteparse] page {} total: {:.1}ms",
-                page_number,
-                web_time::Instant::now()
-                    .duration_since(page_start)
-                    .as_secs_f64()
-                    * 1000.0
-            ));
-
-            parsed_pages.push(parsed_page);
+            ocr_merge::ocr_and_merge_rendered(
+                &mut pages,
+                ocr_rendered,
+                self.config.dpi,
+                engine,
+                &self.config.ocr_language,
+                self.config.num_workers,
+            )
+            .await?;
         }
+        let t_ocr = web_time::Instant::now();
+        log(&format!(
+            "[liteparse] ocr: {:.1}ms",
+            t_ocr.duration_since(t1).as_secs_f64() * 1000.0
+        ));
 
+        let layout_blocks = self
+            .detect_layout_blocks(layout_detector, layout_rendered)
+            .await?;
+        let t_layout = web_time::Instant::now();
+        log(&format!(
+            "[liteparse] layout: {:.1}ms",
+            t_layout.duration_since(t_ocr).as_secs_f64() * 1000.0
+        ));
+
+        // Grid projection
+        let mut parsed_pages = projection::project_pages_to_grid(pages);
+        attach_layout_blocks(&mut parsed_pages, layout_blocks);
         let t2 = web_time::Instant::now();
+        log(&format!(
+            "[liteparse] project: {:.1}ms",
+            t2.duration_since(t_layout).as_secs_f64() * 1000.0
+        ));
 
-        let full_text = parsed_pages
-            .iter()
-            .map(|p| p.text.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        let full_text = if self.config.output_format == crate::config::OutputFormat::Markdown {
+            let md = markdown::format_markdown(&parsed_pages, &outline, self.config.image_mode);
+            let t3 = web_time::Instant::now();
+            log(&format!(
+                "[liteparse] markdown: {:.1}ms",
+                t3.duration_since(t2).as_secs_f64() * 1000.0
+            ));
+            md
+        } else {
+            parsed_pages
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
 
-        let total = t2.duration_since(t0).as_secs_f64() * 1000.0;
+        let total = web_time::Instant::now().duration_since(t0).as_secs_f64() * 1000.0;
         log(&format!("[liteparse] total: {:.1}ms", total));
 
         Ok(ParseResult {
             pages: parsed_pages,
             text: full_text,
+            outline,
+            images,
         })
     }
 
-    fn resolve_ocr_engine(&self) -> Result<std::sync::Arc<dyn OcrEngine>, LiteParseError> {
-        if let Some(e) = self.ocr_engine_override.clone() {
-            return Ok(e);
-        }
+    /// Parse from pre-extracted pages, skipping PDFium text extraction.
+    ///
+    /// The caller supplies `Page`s already populated with text items (and,
+    /// optionally, graphics / struct nodes / image refs) in viewport space
+    /// (top-left origin, 72 DPI). This runs only grid projection and the
+    /// configured output formatter, so it touches neither PDFium nor OCR and
+    /// is fully synchronous. Used when an external extractor (e.g. with its
+    /// own font-recovery pipeline) owns text extraction.
+    pub fn parse_from_pages(&self, pages: Vec<Page>, outline: Vec<OutlineTarget>) -> ParseResult {
+        let parsed_pages = projection::project_pages_to_grid(pages);
 
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            if let Some(ref url) = self.config.ocr_server_url {
-                Ok(std::sync::Arc::new(HttpOcrEngine::new(url.clone())))
-            } else {
-                #[cfg(feature = "tesseract")]
-                {
-                    Ok(std::sync::Arc::new(TesseractOcrEngine::new(
-                        self.config.tessdata_path.clone(),
-                    )))
-                }
-                #[cfg(not(feature = "tesseract"))]
-                {
-                    Err("OCR enabled but no --ocr-server-url provided and tesseract feature is disabled".into())
-                }
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            Err(
-                "OCR enabled but no `ocrEngine` callback was provided (WASM builds have no built-in OCR engine)"
-                    .into(),
-            )
+        let full_text = if self.config.output_format == crate::config::OutputFormat::Markdown {
+            markdown::format_markdown(&parsed_pages, &outline, self.config.image_mode)
+        } else {
+            parsed_pages
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+
+        ParseResult {
+            pages: parsed_pages,
+            text: full_text,
+            outline,
+            images: Vec::new(),
         }
     }
 
@@ -612,17 +386,14 @@ impl LiteParse {
     }
 
     /// Generate annotated layout screenshots from a file path or raw PDF bytes.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn layout_screenshot_input(
         &self,
         input: PdfInput,
         page_numbers: Option<Vec<u32>>,
     ) -> Result<Vec<ScreenshotResult>, LiteParseError> {
-        #[cfg(not(target_arch = "wasm32"))]
         let (validated_input, _guard) =
             conversion::resolve_pdf_input(input, self.config.password.as_deref(), true).await?;
-
-        #[cfg(target_arch = "wasm32")]
-        let validated_input = input;
 
         let effective_page_numbers = match page_numbers {
             Some(nums) => Some(nums),
@@ -693,78 +464,221 @@ impl LiteParse {
     pub fn config(&self) -> &LiteParseConfig {
         &self.config
     }
+
+    async fn create_layout_detector(&self) -> Result<Option<LayoutDetector>, LiteParseError> {
+        #[cfg(not(any(
+            feature = "layout-yolo",
+            feature = "layout-yolo-metal",
+            feature = "layout-yolo-vulkan",
+            feature = "layout-yolo-webgpu"
+        )))]
+        {
+            if self.config.layout_enabled {
+                return Err(LiteParseError::Config(
+                    "layout detection requires a YOLO layout feature".into(),
+                ));
+            }
+            Ok(None)
+        }
+
+        #[cfg(all(target_arch = "wasm32", feature = "layout-yolo-webgpu"))]
+        {
+            LayoutDetector::from_config_async(&self.config).await
+        }
+
+        #[cfg(all(
+            not(all(target_arch = "wasm32", feature = "layout-yolo-webgpu")),
+            any(
+                feature = "layout-yolo",
+                feature = "layout-yolo-metal",
+                feature = "layout-yolo-vulkan",
+                feature = "layout-yolo-webgpu"
+            )
+        ))]
+        {
+            LayoutDetector::from_config(&self.config)
+        }
+    }
+
+    #[cfg(any(
+        feature = "layout-yolo",
+        feature = "layout-yolo-metal",
+        feature = "layout-yolo-vulkan",
+        feature = "layout-yolo-webgpu"
+    ))]
+    fn render_pages_for_layout(
+        &self,
+        document: &Document,
+        pages: &[Page],
+        ocr_rendered: &[ocr_merge::RenderedPage],
+        enabled: bool,
+    ) -> Result<Vec<(usize, RenderedLayoutPage)>, LiteParseError> {
+        if !enabled {
+            return Ok(Vec::new());
+        }
+
+        let mut rendered = Vec::with_capacity(pages.len());
+        for (idx, page) in pages.iter().enumerate() {
+            if let Some(existing) = ocr_rendered.iter().find(|r| r.idx == idx) {
+                rendered.push((
+                    idx,
+                    RenderedLayoutPage::new(
+                        existing.rgb_bytes.clone(),
+                        existing.width,
+                        existing.height,
+                        page.page_width,
+                        page.page_height,
+                    ),
+                ));
+                continue;
+            }
+
+            let page_obj = document.page((page.page_number - 1) as i32)?;
+            let bitmap = page_obj.render(self.config.dpi)?;
+            rendered.push((
+                idx,
+                RenderedLayoutPage::new(
+                    bitmap.to_rgb(),
+                    bitmap.width() as u32,
+                    bitmap.height() as u32,
+                    page.page_width,
+                    page.page_height,
+                ),
+            ));
+        }
+        Ok(rendered)
+    }
+
+    #[cfg(not(any(
+        feature = "layout-yolo",
+        feature = "layout-yolo-metal",
+        feature = "layout-yolo-vulkan",
+        feature = "layout-yolo-webgpu"
+    )))]
+    fn render_pages_for_layout(
+        &self,
+        _document: &Document,
+        _pages: &[Page],
+        _ocr_rendered: &[ocr_merge::RenderedPage],
+        _enabled: bool,
+    ) -> Result<Vec<(usize, ())>, LiteParseError> {
+        Ok(Vec::new())
+    }
+
+    #[cfg(any(
+        feature = "layout-yolo",
+        feature = "layout-yolo-metal",
+        feature = "layout-yolo-vulkan",
+        feature = "layout-yolo-webgpu"
+    ))]
+    async fn detect_layout_blocks(
+        &self,
+        detector: Option<LayoutDetector>,
+        rendered: Vec<(usize, RenderedLayoutPage)>,
+    ) -> Result<Vec<(usize, Vec<LayoutBlock>)>, LiteParseError> {
+        let Some(detector) = detector else {
+            return Ok(Vec::new());
+        };
+
+        let mut by_page = Vec::with_capacity(rendered.len());
+        for (idx, page) in rendered {
+            #[cfg(all(target_arch = "wasm32", feature = "layout-yolo-webgpu"))]
+            let blocks = detector
+                .detect_rendered_async(page, self.config.dpi)
+                .await?;
+
+            #[cfg(not(all(target_arch = "wasm32", feature = "layout-yolo-webgpu")))]
+            let blocks = detector.detect_rendered(page, self.config.dpi)?;
+
+            by_page.push((idx, blocks));
+        }
+        Ok(by_page)
+    }
+
+    #[cfg(not(any(
+        feature = "layout-yolo",
+        feature = "layout-yolo-metal",
+        feature = "layout-yolo-vulkan",
+        feature = "layout-yolo-webgpu"
+    )))]
+    async fn detect_layout_blocks(
+        &self,
+        _detector: Option<LayoutDetector>,
+        _rendered: Vec<(usize, ())>,
+    ) -> Result<Vec<(usize, Vec<LayoutBlock>)>, LiteParseError> {
+        Ok(Vec::new())
+    }
 }
 
-impl ParsedPage {
-    /// Rebuild page text by walking layout blocks in their reading order.
-    ///
-    /// Layout detection provides coarse document regions, which is a better
-    /// ordering signal for multi-column pages than sorting all text items by
-    /// page y/x. Each block is still rendered through the normal projection
-    /// pipeline so local line grouping, spacing, and table-like alignment keep
-    /// the existing behavior. Text that could not be assigned to any block is
-    /// appended at the end instead of being dropped.
-    fn rebuild_text_in_layout_order(&self) -> Option<String> {
-        if self.layout_blocks.is_empty() {
-            return None;
+fn attach_layout_blocks(
+    parsed_pages: &mut [ParsedPage],
+    layout_blocks: Vec<(usize, Vec<LayoutBlock>)>,
+) {
+    for (idx, blocks) in layout_blocks {
+        let Some(page) = parsed_pages.get_mut(idx) else {
+            continue;
+        };
+        page.layout_blocks = blocks;
+        layout_merge::assign_text_items_to_layout_blocks(&mut page.text_items, &page.layout_blocks);
+        layout_merge::compact_layout_blocks(&mut page.layout_blocks, &mut page.text_items);
+        if let Some(text) = rebuild_text_in_layout_order(page) {
+            page.text = text;
         }
+    }
+}
 
-        let mut sections = Vec::new();
+fn rebuild_text_in_layout_order(page: &ParsedPage) -> Option<String> {
+    if page.layout_blocks.is_empty() {
+        return None;
+    }
 
-        for block in &self.layout_blocks {
-            // Re-project each block's items independently. This keeps the
-            // block-level order from XY-cut while preserving the mature
-            // item-level layout reconstruction inside the block.
-            let block_items: Vec<_> = self
-                .text_items
-                .iter()
-                .filter(|item| item.layout_block_id == Some(block.id))
-                .cloned()
-                .collect();
-            let text = projection::project_text_items_to_text(
-                self.page_number,
-                self.page_width,
-                self.page_height,
-                block_items,
-            );
-            let trimmed = text.trim();
-            if !trimmed.is_empty() {
-                sections.push(trimmed.to_string());
-            }
-        }
-
-        // Layout detectors can miss headers, footers, marginalia, or low
-        // confidence regions. Keep that text after the ordered blocks so the
-        // parser remains lossless even when layout assignment is imperfect.
-        let unassigned_items: Vec<_> = self
+    let mut sections = Vec::new();
+    for block in &page.layout_blocks {
+        let block_items: Vec<_> = page
             .text_items
             .iter()
-            .filter(|item| item.layout_block_id.is_none())
+            .filter(|item| item.layout_block_id == Some(block.id))
             .cloned()
             .collect();
-        let unassigned_text = projection::project_text_items_to_text(
-            self.page_number,
-            self.page_width,
-            self.page_height,
-            unassigned_items,
+        let text = layout_merge::project_layout_text(
+            page.page_number,
+            page.page_width,
+            page.page_height,
+            block_items,
         );
-        let unassigned_trimmed = unassigned_text.trim();
-        if !unassigned_trimmed.is_empty() {
-            sections.push(unassigned_trimmed.to_string());
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            sections.push(trimmed.to_string());
         }
+    }
 
-        if sections.is_empty() {
-            None
-        } else {
-            Some(sections.join("\n\n"))
-        }
+    let unassigned_items: Vec<_> = page
+        .text_items
+        .iter()
+        .filter(|item| item.layout_block_id.is_none())
+        .cloned()
+        .collect();
+    let unassigned_text = layout_merge::project_layout_text(
+        page.page_number,
+        page.page_width,
+        page.page_height,
+        unassigned_items,
+    );
+    let unassigned_trimmed = unassigned_text.trim();
+    if !unassigned_trimmed.is_empty() {
+        sections.push(unassigned_trimmed.to_string());
+    }
+
+    if sections.is_empty() {
+        None
+    } else {
+        Some(sections.join("\n\n"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{LayoutBlock, ParsedPage, TextItem};
 
     #[test]
     #[allow(clippy::field_reassign_with_default)]
@@ -775,56 +689,5 @@ mod tests {
         let lp = LiteParse::new(cfg);
         assert!(!lp.config().ocr_enabled);
         assert_eq!(lp.config().max_pages, 7);
-    }
-
-    fn text_item(text: &str, x: f32, y: f32, layout_block_id: Option<usize>) -> TextItem {
-        TextItem {
-            text: text.into(),
-            x,
-            y,
-            width: 80.0,
-            height: 12.0,
-            layout_block_id,
-            ..Default::default()
-        }
-    }
-
-    fn block(id: usize, label: &str, x: f32, y: f32, width: f32, height: f32) -> LayoutBlock {
-        LayoutBlock {
-            id,
-            label: label.into(),
-            confidence: 0.9,
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-
-    #[test]
-    fn rebuilds_page_text_in_layout_block_order() {
-        let page = ParsedPage {
-            page_number: 1,
-            page_width: 600.0,
-            page_height: 800.0,
-            text: "left-1 right-1\nleft-2 right-2".into(),
-            text_items: vec![
-                text_item("left-1", 40.0, 40.0, Some(0)),
-                text_item("right-1", 320.0, 40.0, Some(2)),
-                text_item("left-2", 40.0, 100.0, Some(1)),
-                text_item("right-2", 320.0, 100.0, Some(3)),
-            ],
-            layout_blocks: vec![
-                block(0, "left-1", 40.0, 40.0, 180.0, 30.0),
-                block(1, "left-2", 40.0, 100.0, 180.0, 30.0),
-                block(2, "right-1", 320.0, 40.0, 180.0, 30.0),
-                block(3, "right-2", 320.0, 100.0, 180.0, 30.0),
-            ],
-        };
-
-        assert_eq!(
-            page.rebuild_text_in_layout_order().as_deref(),
-            Some("left-1\n\nleft-2\n\nright-1\n\nright-2")
-        );
     }
 }

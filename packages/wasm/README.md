@@ -31,26 +31,6 @@ console.log(result.text);          // full document text
 console.log(result.pages[0]);      // per-page items with bboxes
 ```
 
-## Layout screenshots
-
-When using a layout-enabled build, `layoutScreenshots()` returns PNG images with
-the detected layout boxes and labels drawn into the image:
-
-```ts
-const parser = new LiteParse({
-  ocrEnabled: false,
-  layoutEnabled: true,
-});
-
-const screenshots = await parser.layoutScreenshots(bytes);
-for (const page of screenshots) {
-  const url = URL.createObjectURL(
-    new Blob([page.imageBytes], { type: "image/png" }),
-  );
-  imageElement.src = url;
-}
-```
-
 ## Config options
 
 All optional, camelCase:
@@ -62,15 +42,11 @@ All optional, camelCase:
 | `maxPages` | `number` | `1000` | Stop after this many pages |
 | `targetPages` | `string` | — | e.g. `"1-5,10,15-20"` |
 | `dpi` | `number` | `150` | Render DPI for OCR / screenshots |
-| `outputFormat` | `"json" \| "markdown" \| "text"` | `"json"` | Format used by formatted parse helpers |
+| `outputFormat` | `"json" \| "text"` | `"json"` | Format used by `parser.format(...)` |
 | `preserveVerySmallText` | `boolean` | `false` | Keep tiny text that's normally filtered |
 | `password` | `string` | — | Password for protected PDFs |
 | `quiet` | `boolean` | `false` | Suppress progress logging |
 | `ocrEngine` | `object` | — | JS-side OCR engine (see below) |
-| `layoutEnabled` | `boolean` | `false` | Run YOLO document layout detection when built with `layout-yolo` |
-| `layoutConfidenceThreshold` | `number` | `0.25` | Minimum YOLO layout detection confidence |
-| `layoutIouThreshold` | `number` | `0.45` | IoU threshold used by layout non-maximum suppression |
-| `layoutImageSize` | `number` | `1280` | YOLO layout input size; the embedded model currently requires `1280` |
 
 ## OCR in the browser
 
@@ -105,32 +81,11 @@ Requires Rust + [`wasm-pack`](https://rustwasm.github.io/wasm-pack/):
 ```sh
 # from packages/wasm
 npm run build           # web target (default)
-npm run build:layout-yolo # web target with layout-yolo enabled
-npm run build:layout-yolo-webgpu # web target with layout-yolo WebGPU backend enabled
 npm run build:bundler   # for webpack/rollup/vite
-npm run build:bundler:layout-yolo # bundler target with layout-yolo enabled
-npm run build:bundler:layout-yolo-webgpu # bundler target with layout-yolo WebGPU backend enabled
 npm run build:nodejs    # for node.js
-npm run build:nodejs:layout-yolo # nodejs target with layout-yolo enabled
-npm run build:nodejs:layout-yolo-webgpu # nodejs target with layout-yolo WebGPU backend enabled
 ```
 
 Output goes to `pkg/`.
-
-Use `layoutEnabled: true` only with a `layout-yolo` build. A non-layout build
-returns `layout detection requires a YOLO layout feature` when layout detection
-is requested.
-
-Browser Wasm layout inference uses a synthetic text-item raster as the YOLO
-input to avoid PDFium page-rendering traps in the current static Wasm archive.
-The model runs locally, but labels can differ from native builds that use real
-rendered page images.
-
-Use `build:layout-yolo-webgpu` on browsers with `navigator.gpu` support when
-you want GPU-accelerated layout inference. Browsers without WebGPU support
-should use the CPU `build:layout-yolo` build.
-
-> **Note:** A real build also needs a static `libpdfium.a` compiled for `wasm32-unknown-emscripten`/`wasm32-unknown-unknown` exposed via `PDFIUM_LIB_PATH`. See the project root `crates/WASM_PLAN.md` for details.
 
 ## License
 

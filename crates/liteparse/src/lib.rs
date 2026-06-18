@@ -9,7 +9,7 @@ pub use config::{LiteParseConfig, OutputFormat};
 pub use error::LiteParseError;
 pub use parser::{LiteParse, ParseResult, ScreenshotResult};
 pub use search::{SearchOptions, search_items};
-pub use types::{ParsedPage, TextItem};
+pub use types::{LayoutBlock, ParsedPage, TextItem};
 
 // ── Modules with user-facing types (visible in docs) ───────────────────
 pub mod config;
@@ -29,6 +29,12 @@ pub mod types;
 pub mod conversion;
 #[doc(hidden)]
 pub mod extract;
+#[doc(hidden)]
+pub mod figure_cluster;
+#[doc(hidden)]
+pub mod font_cmap;
+#[doc(hidden)]
+pub mod glyph_names;
 #[cfg(any(
     feature = "layout-yolo",
     feature = "layout-yolo-metal",
@@ -38,6 +44,8 @@ pub mod extract;
 #[doc(hidden)]
 mod layout_yolo;
 #[doc(hidden)]
+pub mod markdown_layout;
+#[doc(hidden)]
 pub mod ocr;
 #[doc(hidden)]
 pub mod ocr_merge;
@@ -45,5 +53,6 @@ pub mod ocr_merge;
 pub mod output;
 #[doc(hidden)]
 pub mod projection;
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod render;

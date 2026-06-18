@@ -62,8 +62,11 @@ pub(crate) fn render_pages_for_ocr(
             0.0
         };
 
-        let mut needs_ocr =
-            text_length < 20 || text_coverage < 0.15 || has_images || page_is_garbled(page);
+        // Low spatial coverage only signals a scan/sparse page when there also
+        // isn't much native text. A text-dense page (e.g. a ruled table with
+        // wide intra-cell whitespace) is spatially sparse but needs no OCR.
+        let sparse_text = text_length < 2000 && text_coverage < 0.15;
+        let mut needs_ocr = text_length < 20 || sparse_text || has_images || page_is_garbled(page);
 
         // Text drawn as filled vector outlines lives outside the text layer
         // entirely: no text items, no image XObjects, so none of the above
@@ -731,6 +734,9 @@ mod tests {
             page_width: 100.0,
             page_height: 100.0,
             text_items: Vec::new(),
+            graphics: Vec::new(),
+            struct_nodes: Vec::new(),
+            image_refs: Vec::new(),
         }
     }
 
@@ -760,6 +766,9 @@ mod tests {
                 height: 50.0,
                 ..Default::default()
             }],
+            graphics: Vec::new(),
+            struct_nodes: Vec::new(),
+            image_refs: Vec::new(),
         }
     }
 
@@ -780,6 +789,9 @@ mod tests {
                 height: 5.0,
                 ..Default::default()
             }],
+            graphics: Vec::new(),
+            struct_nodes: Vec::new(),
+            image_refs: Vec::new(),
         }
     }
 

@@ -28,14 +28,16 @@ export interface LiteParseNativeConfig {
   targetPages?: string;
   dpi?: number;
   outputFormat?: string;
-  preserveVerySmallText?: boolean;
-  password?: string;
-  quiet?: boolean;
-  numWorkers?: number;
+  imageMode?: string;
+  extractLinks?: boolean;
   layoutEnabled?: boolean;
   layoutConfidenceThreshold?: number;
   layoutIouThreshold?: number;
   layoutImageSize?: number;
+  preserveVerySmallText?: boolean;
+  password?: string;
+  quiet?: boolean;
+  numWorkers?: number;
 }
 
 export interface NativeTextItem {
@@ -47,8 +49,43 @@ export interface NativeTextItem {
   fontName?: string;
   fontSize?: number;
   confidence?: number;
+  rotation?: number;
   layoutBlockId?: number;
   layoutLabel?: string;
+}
+
+export interface NativeGraphic {
+  kind: string;
+  x1?: number;
+  y1?: number;
+  x2?: number;
+  y2?: number;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  hasFill?: boolean;
+  hasStroke?: boolean;
+  fillColor?: string;
+  strokeColor?: string;
+  lineWidth?: number;
+}
+
+export interface NativePageInput {
+  pageNumber: number;
+  pageWidth: number;
+  pageHeight: number;
+  textItems: NativeTextItem[];
+  graphics?: NativeGraphic[];
+}
+
+export interface NativeParsedPage {
+  pageNum: number;
+  width: number;
+  height: number;
+  text: string;
+  textItems: NativeTextItem[];
+  layoutBlocks: NativeLayoutBlock[];
 }
 
 export interface NativeLayoutBlock {
@@ -62,18 +99,17 @@ export interface NativeLayoutBlock {
   text: string;
 }
 
-export interface NativeParsedPage {
-  pageNum: number;
-  width: number;
-  height: number;
-  text: string;
-  textItems: NativeTextItem[];
-  layoutBlocks: NativeLayoutBlock[];
+export interface NativeExtractedImage {
+  id: string;
+  page: number;
+  format: string;
+  bytes: Buffer;
 }
 
 export interface NativeParseResult {
   pages: NativeParsedPage[];
   text: string;
+  images: NativeExtractedImage[];
 }
 
 export interface NativeScreenshotResult {
@@ -85,6 +121,7 @@ export interface NativeScreenshotResult {
 
 export interface LiteParseNative {
   parse(input: string | Buffer): Promise<NativeParseResult>;
+  parsePages(pages: NativePageInput[]): NativeParseResult;
   screenshot(
     input: string | Buffer,
     pageNumbers?: number[] | null,

@@ -1,9 +1,9 @@
 use napi_derive::napi;
 
-use liteparse::config::{LiteParseConfig, OutputFormat};
+use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
+use liteparse::layout_merge;
 use liteparse::parser::ParseResult;
-use liteparse::projection;
-use liteparse::types::{LayoutBlock, ParsedPage, TextItem};
+use liteparse::types::{GraphicPrimitive, LayoutBlock, Page, ParsedPage, Rect, TextItem};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -26,7 +26,7 @@ pub struct JsLiteParseConfig {
     pub target_pages: Option<String>,
     /// DPI for rendering pages (used for OCR and screenshots).
     pub dpi: Option<f64>,
-    /// Output format: "json", "markdown", or "text".
+    /// Output format: "json", "text", or "markdown".
     pub output_format: Option<String>,
     /// Keep very small text that would normally be filtered out.
     pub preserve_very_small_text: Option<bool>,
@@ -36,6 +36,13 @@ pub struct JsLiteParseConfig {
     pub quiet: Option<bool>,
     /// Number of concurrent OCR workers (default: CPU cores - 1).
     pub num_workers: Option<u32>,
+    /// How to surface raster images in markdown output: "off", "placeholder"
+    /// (default — emits `![](image_pN_K.png)` references with no bytes), or
+    /// "embed" (also returns each image's PNG bytes on `images`).
+    pub image_mode: Option<String>,
+    /// Render hyperlink annotations as `[text](url)` in markdown output
+    /// (default true). Set false for plain anchor text.
+    pub extract_links: Option<bool>,
     /// Whether YOLO document layout detection is enabled.
     pub layout_enabled: Option<bool>,
     /// Minimum layout detection confidence score.
@@ -72,8 +79,8 @@ impl JsLiteParseConfig {
         }
         if let Some(v) = self.output_format {
             cfg.output_format = match v.as_str() {
-                "markdown" | "md" => OutputFormat::Markdown,
                 "text" => OutputFormat::Text,
+                "markdown" | "md" => OutputFormat::Markdown,
                 _ => OutputFormat::Json,
             };
         }
@@ -88,6 +95,16 @@ impl JsLiteParseConfig {
         }
         if let Some(v) = self.num_workers {
             cfg.num_workers = v as usize;
+        }
+        if let Some(v) = self.image_mode {
+            cfg.image_mode = match v.as_str() {
+                "off" | "none" => ImageMode::Off,
+                "embed" => ImageMode::Embed,
+                _ => ImageMode::Placeholder,
+            };
+        }
+        if let Some(v) = self.extract_links {
+            cfg.extract_links = v;
         }
         if let Some(v) = self.layout_enabled {
             cfg.layout_enabled = v;
@@ -115,13 +132,19 @@ impl JsLiteParseConfig {
             dpi: Some(cfg.dpi as f64),
             output_format: Some(match cfg.output_format {
                 OutputFormat::Json => "json".to_string(),
-                OutputFormat::Markdown => "markdown".to_string(),
                 OutputFormat::Text => "text".to_string(),
+                OutputFormat::Markdown => "markdown".to_string(),
             }),
             preserve_very_small_text: Some(cfg.preserve_very_small_text),
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),
             num_workers: Some(cfg.num_workers as u32),
+            image_mode: Some(match cfg.image_mode {
+                ImageMode::Off => "off".to_string(),
+                ImageMode::Placeholder => "placeholder".to_string(),
+                ImageMode::Embed => "embed".to_string(),
+            }),
+            extract_links: Some(cfg.extract_links),
             layout_enabled: Some(cfg.layout_enabled),
             layout_confidence_threshold: Some(cfg.layout_confidence_threshold as f64),
             layout_iou_threshold: Some(cfg.layout_iou_threshold as f64),
@@ -145,6 +168,8 @@ pub struct JsTextItem {
     pub font_name: Option<String>,
     pub font_size: Option<f64>,
     pub confidence: Option<f64>,
+    /// Rotation in degrees (viewport space). Defaults to 0 when omitted.
+    pub rotation: Option<f64>,
     pub layout_block_id: Option<u32>,
     pub layout_label: Option<String>,
 }
@@ -157,6 +182,7 @@ impl JsTextItem {
             y: self.y as f32,
             width: self.width as f32,
             height: self.height as f32,
+            rotation: self.rotation.unwrap_or(0.0) as f32,
             font_name: self.font_name.clone(),
             font_size: self.font_size.map(|v| v as f32),
             confidence: self.confidence.map(|v| v as f32),
@@ -173,6 +199,7 @@ impl JsTextItem {
             y: item.y as f64,
             width: item.width as f64,
             height: item.height as f64,
+            rotation: Some(item.rotation as f64),
             font_name: item.font_name.clone(),
             font_size: item.font_size.map(|v| v as f64),
             confidence: item.confidence.map(|v| v as f64).or(Some(1.0)),
@@ -183,7 +210,114 @@ impl JsTextItem {
 }
 
 // ---------------------------------------------------------------------------
-// LayoutBlock
+// Graphic primitive (pre-extracted vector graphics)
+// ---------------------------------------------------------------------------
+
+/// A vector-graphic primitive supplied by an external extractor. `kind` selects
+/// the variant: `"stroke"` (uses `x1/y1/x2/y2`) or `"rect"` (uses
+/// `x/y/width/height`). Coordinates are viewport space (top-left origin, 72
+/// DPI), matching the text items. `has_fill`/`has_stroke` carry the paint
+/// intent even when no color is known, so ruled-table edge detection still
+/// treats a colorless stroked rect as stroked.
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsGraphic {
+    /// "stroke" or "rect". Anything else is dropped.
+    pub kind: String,
+    // Stroke endpoints (used when kind == "stroke").
+    pub x1: Option<f64>,
+    pub y1: Option<f64>,
+    pub x2: Option<f64>,
+    pub y2: Option<f64>,
+    // Rect bbox top-left + size (used when kind == "rect").
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub width: Option<f64>,
+    pub height: Option<f64>,
+    /// Whether the path is filled. Drives Rect `fill` presence.
+    pub has_fill: Option<bool>,
+    /// Whether the path is stroked. Drives Rect `stroke` presence.
+    pub has_stroke: Option<bool>,
+    /// Fill color as ARGB hex (e.g. "ff000000"). May be absent even when filled.
+    pub fill_color: Option<String>,
+    /// Stroke color as ARGB hex. May be absent even when stroked.
+    pub stroke_color: Option<String>,
+    /// Stroke line width in points.
+    pub line_width: Option<f64>,
+}
+
+impl JsGraphic {
+    pub fn to_rust(&self) -> Option<GraphicPrimitive> {
+        match self.kind.as_str() {
+            "stroke" => Some(GraphicPrimitive::Stroke {
+                x1: self.x1.unwrap_or(0.0) as f32,
+                y1: self.y1.unwrap_or(0.0) as f32,
+                x2: self.x2.unwrap_or(0.0) as f32,
+                y2: self.y2.unwrap_or(0.0) as f32,
+                color: self.stroke_color.clone(),
+                width: self.line_width.unwrap_or(0.0) as f32,
+            }),
+            "rect" => Some(GraphicPrimitive::Rect {
+                bbox: Rect {
+                    x: self.x.unwrap_or(0.0) as f32,
+                    y: self.y.unwrap_or(0.0) as f32,
+                    width: self.width.unwrap_or(0.0) as f32,
+                    height: self.height.unwrap_or(0.0) as f32,
+                },
+                fill: if self.has_fill.unwrap_or(false) {
+                    Some(self.fill_color.clone().unwrap_or_default())
+                } else {
+                    None
+                },
+                stroke: if self.has_stroke.unwrap_or(false) {
+                    Some(self.stroke_color.clone().unwrap_or_default())
+                } else {
+                    None
+                },
+            }),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Page input (pre-extracted)
+// ---------------------------------------------------------------------------
+
+/// A page of pre-extracted text supplied by an external extractor. Coordinates
+/// are viewport space (top-left origin, 72 DPI). `graphics` enables ruled-table
+/// and horizontal-rule detection; struct nodes are still unsupported on this
+/// path, so tagged-heading detection remains unavailable until they are added.
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsPageInput {
+    pub page_number: u32,
+    pub page_width: f64,
+    pub page_height: f64,
+    pub text_items: Vec<JsTextItem>,
+    pub graphics: Option<Vec<JsGraphic>>,
+}
+
+impl JsPageInput {
+    pub fn to_rust(&self) -> Page {
+        Page {
+            page_number: self.page_number as usize,
+            page_width: self.page_width as f32,
+            page_height: self.page_height as f32,
+            text_items: self.text_items.iter().map(JsTextItem::to_rust).collect(),
+            graphics: self
+                .graphics
+                .as_ref()
+                .map(|gs| gs.iter().filter_map(JsGraphic::to_rust).collect())
+                .unwrap_or_default(),
+            struct_nodes: Vec::new(),
+            image_refs: Vec::new(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ParsedPage
 // ---------------------------------------------------------------------------
 
 #[napi(object)]
@@ -201,7 +335,7 @@ pub struct JsLayoutBlock {
 
 impl JsLayoutBlock {
     pub fn from_rust(block: &LayoutBlock, page: &ParsedPage) -> Self {
-        let text = projection::project_text_items_to_text(
+        let text = layout_merge::project_layout_text(
             page.page_number,
             page.page_width,
             page.page_height,
@@ -226,10 +360,6 @@ impl JsLayoutBlock {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// ParsedPage
-// ---------------------------------------------------------------------------
 
 #[napi(object)]
 #[derive(Clone)]
@@ -268,6 +398,16 @@ impl JsParsedPage {
 pub struct JsParseResult {
     pub pages: Vec<JsParsedPage>,
     pub text: String,
+    pub images: Vec<JsExtractedImage>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsExtractedImage {
+    pub id: String,
+    pub page: u32,
+    pub format: String,
+    pub bytes: napi::bindgen_prelude::Buffer,
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +428,16 @@ impl JsParseResult {
         Self {
             pages: result.pages.iter().map(JsParsedPage::from_rust).collect(),
             text: result.text.clone(),
+            images: result
+                .images
+                .iter()
+                .map(|img| JsExtractedImage {
+                    id: img.id.clone(),
+                    page: img.page,
+                    format: img.format.clone(),
+                    bytes: img.bytes.clone().into(),
+                })
+                .collect(),
         }
     }
 }

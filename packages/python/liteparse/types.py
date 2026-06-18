@@ -15,7 +15,6 @@ class TextItem:
     y: float
     width: float
     height: float
-    text: str = ""
     font_name: Optional[str] = None
     font_size: Optional[float] = None
     confidence: Optional[float] = None
@@ -34,6 +33,7 @@ class LayoutBlock:
     y: float
     width: float
     height: float
+    text: str = ""
 
 
 @dataclass
@@ -49,11 +49,26 @@ class ParsedPage:
 
 
 @dataclass
+class ExtractedImage:
+    """An embedded raster image extracted from a page.
+
+    Populated only when the parser was configured with ``image_mode="embed"``.
+    The ``id`` matches the reference used in the markdown output
+    (e.g. ``![](image_p1_0.png)`` → ``id="p1_0"``).
+    """
+    id: str
+    page: int
+    format: str
+    bytes: bytes
+
+
+@dataclass
 class ParseResult:
     """Result of parsing a document."""
 
     pages: List[ParsedPage]
     text: str
+    images: List[ExtractedImage] = field(default_factory=list)
 
     @property
     def num_pages(self) -> int:

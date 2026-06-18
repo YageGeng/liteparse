@@ -1,145 +1,240 @@
-use crate::projection;
-use crate::types::{LayoutBlock, ParsedPage, TextItem};
+use crate::config::ImageMode;
+use crate::markdown_layout::{
+    build_heading_map, classify_page_with_filters, compute_body_size, compute_header_footer_set,
+    detect_single_page_chrome, render_blocks,
+};
+use crate::types::{OutlineTarget, ParsedPage};
 
-/// Format parsed pages as Markdown.
+/// Format parsed pages as markdown.
 ///
-/// When layout blocks are available, their labels drive the Markdown structure.
-/// Without layout blocks, fall back to the already reconstructed page text.
-pub fn format_markdown(pages: &[ParsedPage]) -> String {
-    pages
-        .iter()
-        .filter_map(format_page_markdown)
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-fn format_page_markdown(page: &ParsedPage) -> Option<String> {
-    if page.layout_blocks.is_empty() {
-        let text = page.text.trim();
-        return (!text.is_empty()).then(|| text.to_string());
+/// Whole-document signals (body font size, heading-level map, repeating
+/// header/footer set) are computed once up front, then each page is classified
+/// into blocks ([`classify_page_with_filters`]) and rendered. Block classes
+/// cover headings, paragraphs (with de-hyphenation and inline emphasis), lists,
+/// code blocks, ruled and borderless tables, horizontal rules, and figures.
+///
+/// Pages are emitted in order, separated by `\n\n-----\n\n`.
+/// Pages that contain no projected lines (e.g. blank
+/// or fully-OCR pages without font-size info) fall back to the projected text
+/// wrapped in a fenced block so we never silently drop content.
+pub fn format_markdown(
+    pages: &[ParsedPage],
+    outline: &[OutlineTarget],
+    image_mode: ImageMode,
+) -> String {
+    if pages.is_empty() {
+        return String::new();
     }
 
-    let mut sections = Vec::new();
-    for block in &page.layout_blocks {
-        if let Some(section) = format_block_markdown(page, block) {
-            sections.push(section);
+    let body_size = compute_body_size(pages);
+    let heading_map = build_heading_map(pages, body_size);
+    let header_footer = compute_header_footer_set(pages);
+
+    let mut out = String::new();
+    for (i, page) in pages.iter().enumerate() {
+        if i > 0 {
+            out.push_str("\n\n-----\n\n");
         }
-    }
+        if page.projected_lines.is_empty() {
+            // No structural metadata for this page — fall back to the
+            // projection text inside a fence so nothing is dropped.
+            out.push_str("```text\n");
+            out.push_str(&page.text);
+            if !page.text.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("```");
+            continue;
+        }
 
-    (!sections.is_empty()).then(|| sections.join("\n\n"))
+        // Filter outline entries to this page so the classifier's y/title
+        // match is a O(entries_on_page) scan per line, not O(whole doc).
+        let target_index = (page.page_number as i32).saturating_sub(1);
+        let page_outline: Vec<OutlineTarget> = outline
+            .iter()
+            .filter(|e| e.page_index == target_index)
+            .cloned()
+            .collect();
+        let chrome_indices = detect_single_page_chrome(page, body_size);
+        let mut blocks = classify_page_with_filters(
+            page,
+            &heading_map,
+            &header_footer,
+            &page_outline,
+            image_mode,
+            &chrome_indices,
+        );
+        // A page whose only surviving blocks are horizontal rules (all its
+        // text was stripped as chrome) should render empty, not as a stack
+        // of bare `---` separators.
+        let has_content = blocks.iter().any(|b| {
+            !matches!(
+                b,
+                crate::markdown_layout::Block::HorizontalRule
+                    | crate::markdown_layout::Block::Figure { .. }
+            )
+        });
+        if !has_content {
+            blocks.retain(|b| !matches!(b, crate::markdown_layout::Block::HorizontalRule));
+        }
+        dedupe_rules(&mut blocks);
+        out.push_str(&render_blocks(&blocks));
+    }
+    out
 }
 
-fn format_block_markdown(page: &ParsedPage, block: &LayoutBlock) -> Option<String> {
-    let block_items: Vec<TextItem> = page
-        .text_items
-        .iter()
-        .filter(|item| item.layout_block_id == Some(block.id))
-        .cloned()
-        .collect();
-
-    let text = projection::project_text_items_to_text(
-        page.page_number,
-        page.page_width,
-        page.page_height,
-        block_items,
-    );
-    let text = text.trim();
-
-    match block.label.as_str() {
-        "Picture" if text.is_empty() => Some("![Picture](#)".to_string()),
-        _ if text.is_empty() => None,
-        "Title" => Some(format!("# {}", one_line(text))),
-        "SectionHeader" => Some(format!("## {}", one_line(text))),
-        "ListItem" => Some(
-            text.lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(|line| format!("- {line}"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
-        "Formula" => Some(format!("$$\n{}\n$$", text)),
-        "Caption" | "Footnote" => Some(format!("_{}_", text)),
-        "Picture" => Some(format!("![Picture](#)\n\n{}", text)),
-        _ => Some(text.to_string()),
+/// Collapse cosmetic horizontal-rule noise on a single page's block stream:
+/// drop leading/trailing rules (which would otherwise abut the `-----` page
+/// separator) and collapse runs of consecutive rules to one. Rules come from
+/// two sources — vector-graphics detection and decorative divider text — and
+/// doubling up reads as sloppy output to a human, while carrying no extra
+/// structure for an LLM.
+fn dedupe_rules(blocks: &mut Vec<crate::markdown_layout::Block>) {
+    use crate::markdown_layout::Block::HorizontalRule;
+    while matches!(blocks.first(), Some(HorizontalRule)) {
+        blocks.remove(0);
     }
-}
-
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    while matches!(blocks.last(), Some(HorizontalRule)) {
+        blocks.pop();
+    }
+    blocks.dedup_by(|a, b| matches!((a, b), (HorizontalRule, HorizontalRule)));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{Anchor, ProjectedLine, Rect, TextItem};
 
-    fn item(text: &str, x: f32, y: f32, block_id: usize) -> TextItem {
-        TextItem {
+    fn line(text: &str, x: f32, y: f32, h: f32, size: f32) -> ProjectedLine {
+        ProjectedLine {
             text: text.into(),
-            x,
-            y,
-            width: 20.0,
-            height: 10.0,
-            layout_block_id: Some(block_id),
-            ..Default::default()
+            bbox: Rect {
+                x,
+                y,
+                width: text.chars().count() as f32 * (size * 0.5),
+                height: h,
+            },
+            anchor: Anchor::Left,
+            indent_x: x,
+            dominant_font_size: size,
+            font_size_is_estimated: false,
+            heading_font_size: None,
+            dominant_font_name: Some("Arial".into()),
+            all_bold: false,
+            all_italic: false,
+            all_mono: false,
+            all_strike: false,
+            spans: vec![TextItem::default()],
+            region_path: Vec::new(),
+            mcid: None,
+            in_figure: false,
         }
     }
 
-    fn block(id: usize, label: &str, y: f32) -> LayoutBlock {
-        LayoutBlock {
-            id,
-            label: label.into(),
-            confidence: 0.9,
-            x: 10.0,
-            y,
-            width: 100.0,
-            height: 20.0,
-        }
-    }
-
-    fn page(text_items: Vec<TextItem>, layout_blocks: Vec<LayoutBlock>) -> ParsedPage {
+    fn page_with(n: usize, lines: Vec<ProjectedLine>) -> ParsedPage {
         ParsedPage {
-            page_number: 1,
+            page_number: n,
             page_width: 612.0,
             page_height: 792.0,
-            text: "fallback text".into(),
-            text_items,
-            layout_blocks,
+            text: "fallback".into(),
+            text_items: vec![],
+            layout_blocks: vec![],
+            projected_lines: lines,
+            regions: crate::types::Region::default(),
+            graphics: vec![],
+            figures: vec![],
+            struct_nodes: vec![],
+            image_refs: vec![],
         }
     }
 
     #[test]
-    fn formats_markdown_from_layout_labels() {
-        let page = page(
-            vec![
-                item("Paper Title", 10.0, 10.0, 0),
-                item("Intro", 10.0, 40.0, 1),
-                item("first item", 10.0, 70.0, 2),
-                item("x = y", 10.0, 100.0, 3),
-                item("caption text", 10.0, 130.0, 4),
-            ],
-            vec![
-                block(0, "Title", 10.0),
-                block(1, "SectionHeader", 40.0),
-                block(2, "ListItem", 70.0),
-                block(3, "Formula", 100.0),
-                block(4, "Caption", 130.0),
-            ],
-        );
-
-        let markdown = format_markdown(&[page]);
-
-        assert!(markdown.contains("# Paper Title"));
-        assert!(markdown.contains("## Intro"));
-        assert!(markdown.contains("- first item"));
-        assert!(markdown.contains("$$\nx = y\n$$"));
-        assert!(markdown.contains("_caption text_"));
+    fn test_empty() {
+        assert_eq!(format_markdown(&[], &[], ImageMode::Placeholder), "");
     }
 
     #[test]
-    fn falls_back_to_page_text_without_layout_blocks() {
-        let markdown = format_markdown(&[page(vec![], vec![])]);
+    fn dedupe_rules_drops_edges_and_collapses_runs() {
+        use crate::markdown_layout::Block::{self, HorizontalRule, Paragraph};
+        let p = |t: &str| Paragraph {
+            text: t.into(),
+            bold: false,
+            italic: false,
+        };
+        let mut blocks = vec![
+            HorizontalRule,
+            p("a"),
+            HorizontalRule,
+            HorizontalRule,
+            p("b"),
+            HorizontalRule,
+        ];
+        dedupe_rules(&mut blocks);
+        let kinds: Vec<bool> = blocks
+            .iter()
+            .map(|b| matches!(b, Block::HorizontalRule))
+            .collect();
+        // Leading + trailing rules gone; the doubled interior run collapsed to one.
+        assert_eq!(kinds, vec![false, true, false]);
+    }
 
-        assert_eq!(markdown, "fallback text");
+    #[test]
+    fn test_fallback_when_no_projected_lines() {
+        let p = ParsedPage {
+            page_number: 1,
+            page_width: 0.0,
+            page_height: 0.0,
+            text: "hello".into(),
+            text_items: vec![],
+            layout_blocks: vec![],
+            projected_lines: vec![],
+            regions: crate::types::Region::default(),
+            graphics: vec![],
+            figures: vec![],
+            struct_nodes: vec![],
+            image_refs: vec![],
+        };
+        let out = format_markdown(&[p], &[], ImageMode::Placeholder);
+        assert!(out.contains("```text"));
+        assert!(out.contains("hello"));
+    }
+
+    #[test]
+    fn test_heading_and_paragraph() {
+        let p = page_with(
+            1,
+            vec![
+                line("My Title For This Test Document", 50.0, 50.0, 18.0, 18.0),
+                // Enough body text to dominate the char-weighted body-size
+                // mode so the title at 18pt registers as larger-than-body.
+                line("First sentence of body prose here.", 50.0, 80.0, 10.0, 10.0),
+                line(
+                    "Second sentence of body prose here.",
+                    50.0,
+                    92.0,
+                    10.0,
+                    10.0,
+                ),
+                line(
+                    "Third sentence of body prose here.",
+                    50.0,
+                    104.0,
+                    10.0,
+                    10.0,
+                ),
+            ],
+        );
+        let out = format_markdown(&[p], &[], ImageMode::Placeholder);
+        assert!(out.contains("# My Title For This Test Document"));
+        assert!(out.contains("First sentence of body prose here."));
+    }
+
+    #[test]
+    fn test_multi_page_separator() {
+        let a = page_with(1, vec![line("A page.", 50.0, 80.0, 10.0, 10.0)]);
+        let b = page_with(2, vec![line("B page.", 50.0, 80.0, 10.0, 10.0)]);
+        let out = format_markdown(&[a, b], &[], ImageMode::Placeholder);
+        assert!(out.contains("-----"));
+        assert!(out.find("A page.").unwrap() < out.find("B page.").unwrap());
     }
 }

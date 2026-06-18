@@ -5,7 +5,9 @@ import {
   type NativeParseResult,
   type NativeParsedPage,
   type NativeLayoutBlock,
+  type NativePageInput,
   type NativeTextItem,
+  type NativeExtractedImage,
 } from "./native.js";
 
 // ---------------------------------------------------------------------------
@@ -13,7 +15,8 @@ import {
 // ---------------------------------------------------------------------------
 
 export type LiteParseInput = string | Buffer | Uint8Array;
-export type OutputFormat = "json" | "markdown" | "text";
+export type OutputFormat = "json" | "text" | "markdown";
+export type ImageMode = "off" | "placeholder" | "embed";
 
 export interface LiteParseConfig {
   ocrLanguage: string;
@@ -24,14 +27,18 @@ export interface LiteParseConfig {
   targetPages?: string;
   dpi: number;
   outputFormat: OutputFormat;
-  preserveVerySmallText: boolean;
-  password?: string;
-  quiet: boolean;
-  numWorkers: number;
+  /** How to surface raster images in markdown output (default: "placeholder"). */
+  imageMode: ImageMode;
+  /** Render hyperlink annotations as `[text](url)` in markdown output (default: true). */
+  extractLinks: boolean;
   layoutEnabled: boolean;
   layoutConfidenceThreshold: number;
   layoutIouThreshold: number;
   layoutImageSize: number;
+  preserveVerySmallText: boolean;
+  password?: string;
+  quiet: boolean;
+  numWorkers: number;
 }
 
 export interface TextItem {
@@ -43,8 +50,57 @@ export interface TextItem {
   fontName?: string;
   fontSize?: number;
   confidence?: number;
+  /** Rotation in degrees (viewport space). Defaults to 0 when omitted. */
+  rotation?: number;
   layoutBlockId?: number;
   layoutLabel?: string;
+}
+
+/**
+ * A vector-graphic primitive supplied to {@link LiteParse.parsePages}. `kind`
+ * selects the variant: `"stroke"` (uses `x1/y1/x2/y2`) or `"rect"` (uses
+ * `x/y/width/height`, top-left origin). Coordinates are viewport space (72 DPI),
+ * matching the text items. `hasFill`/`hasStroke` carry the paint intent even
+ * when the color is unknown, so ruled-table edge detection still treats a
+ * colorless stroked rect as stroked.
+ */
+export interface Graphic {
+  kind: "stroke" | "rect";
+  x1?: number;
+  y1?: number;
+  x2?: number;
+  y2?: number;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  hasFill?: boolean;
+  hasStroke?: boolean;
+  fillColor?: string;
+  strokeColor?: string;
+  lineWidth?: number;
+}
+
+/**
+ * A page of pre-extracted text supplied to {@link LiteParse.parsePages}.
+ * Coordinates are viewport space (top-left origin, 72 DPI). `graphics` is
+ * optional; when supplied it enables ruled-table and horizontal-rule detection.
+ */
+export interface PageInput {
+  pageNumber: number;
+  pageWidth: number;
+  pageHeight: number;
+  textItems: TextItem[];
+  graphics?: Graphic[];
+}
+
+export interface ParsedPage {
+  pageNum: number;
+  width: number;
+  height: number;
+  text: string;
+  textItems: TextItem[];
+  layoutBlocks: LayoutBlock[];
 }
 
 export interface LayoutBlock {
@@ -58,18 +114,19 @@ export interface LayoutBlock {
   text: string;
 }
 
-export interface ParsedPage {
-  pageNum: number;
-  width: number;
-  height: number;
-  text: string;
-  textItems: TextItem[];
-  layoutBlocks: LayoutBlock[];
+export interface ExtractedImage {
+  /** Reference id used in the markdown output (e.g. `![](image_p1_0.png)` → `"p1_0"`). */
+  id: string;
+  page: number;
+  format: string;
+  bytes: Buffer;
 }
 
 export interface ParseResult {
   pages: ParsedPage[];
   text: string;
+  /** Populated only when configured with `imageMode: "embed"`. */
+  images: ExtractedImage[];
 }
 
 export interface ScreenshotResult {
@@ -97,14 +154,16 @@ export class LiteParse {
       targetPages: userConfig.targetPages,
       dpi: userConfig.dpi,
       outputFormat: userConfig.outputFormat,
-      preserveVerySmallText: userConfig.preserveVerySmallText,
-      password: userConfig.password,
-      quiet: userConfig.quiet,
-      numWorkers: userConfig.numWorkers,
+      imageMode: userConfig.imageMode,
+      extractLinks: userConfig.extractLinks,
       layoutEnabled: userConfig.layoutEnabled,
       layoutConfidenceThreshold: userConfig.layoutConfidenceThreshold,
       layoutIouThreshold: userConfig.layoutIouThreshold,
       layoutImageSize: userConfig.layoutImageSize,
+      preserveVerySmallText: userConfig.preserveVerySmallText,
+      password: userConfig.password,
+      quiet: userConfig.quiet,
+      numWorkers: userConfig.numWorkers,
     };
 
     this._native = new native.LiteParse(nativeConfig);
@@ -120,14 +179,16 @@ export class LiteParse {
       targetPages: resolved.targetPages ?? undefined,
       dpi: resolved.dpi ?? 150,
       outputFormat: (resolved.outputFormat as OutputFormat) ?? "json",
-      preserveVerySmallText: resolved.preserveVerySmallText ?? false,
-      password: resolved.password ?? undefined,
-      quiet: resolved.quiet ?? false,
-      numWorkers: resolved.numWorkers ?? 1,
+      imageMode: (resolved.imageMode as ImageMode) ?? "placeholder",
+      extractLinks: resolved.extractLinks ?? true,
       layoutEnabled: resolved.layoutEnabled ?? false,
       layoutConfidenceThreshold: resolved.layoutConfidenceThreshold ?? 0.25,
       layoutIouThreshold: resolved.layoutIouThreshold ?? 0.45,
       layoutImageSize: resolved.layoutImageSize ?? 1280,
+      preserveVerySmallText: resolved.preserveVerySmallText ?? false,
+      password: resolved.password ?? undefined,
+      quiet: resolved.quiet ?? false,
+      numWorkers: resolved.numWorkers ?? 1,
     };
   }
 
@@ -139,6 +200,29 @@ export class LiteParse {
     return {
       pages: result.pages.map(toPage),
       text: result.text,
+      images: (result.images ?? []).map(toImage),
+    };
+  }
+
+  /**
+   * Parse from pre-extracted pages, skipping PDFium text extraction. Runs only
+   * grid projection + the configured output formatter, so the caller's own
+   * text-extraction / font-recovery owns the text content. Synchronous: no
+   * PDFium load and no OCR on this path.
+   */
+  parsePages(pages: PageInput[]): ParseResult {
+    const nativePages: NativePageInput[] = pages.map((p) => ({
+      pageNumber: p.pageNumber,
+      pageWidth: p.pageWidth,
+      pageHeight: p.pageHeight,
+      textItems: p.textItems,
+      graphics: p.graphics,
+    }));
+    const result = this._native.parsePages(nativePages);
+    return {
+      pages: result.pages.map(toPage),
+      text: result.text,
+      images: (result.images ?? []).map(toImage),
     };
   }
 
@@ -190,22 +274,7 @@ function toPage(p: NativeParsedPage): ParsedPage {
     height: p.height,
     text: p.text,
     textItems: p.textItems.map(toTextItem),
-    layoutBlocks: p.layoutBlocks.map(toLayoutBlock),
-  };
-}
-
-function toTextItem(item: NativeTextItem): TextItem {
-  return {
-    text: item.text,
-    x: item.x,
-    y: item.y,
-    width: item.width,
-    height: item.height,
-    fontName: item.fontName,
-    fontSize: item.fontSize,
-    confidence: item.confidence,
-    layoutBlockId: item.layoutBlockId,
-    layoutLabel: item.layoutLabel,
+    layoutBlocks: (p.layoutBlocks ?? []).map(toLayoutBlock),
   };
 }
 
@@ -219,6 +288,31 @@ function toLayoutBlock(block: NativeLayoutBlock): LayoutBlock {
     width: block.width,
     height: block.height,
     text: block.text,
+  };
+}
+
+function toImage(img: NativeExtractedImage): ExtractedImage {
+  return {
+    id: img.id,
+    page: img.page,
+    format: img.format,
+    bytes: img.bytes,
+  };
+}
+
+function toTextItem(item: NativeTextItem): TextItem {
+  return {
+    text: item.text,
+    x: item.x,
+    y: item.y,
+    width: item.width,
+    height: item.height,
+    fontName: item.fontName,
+    fontSize: item.fontSize,
+    confidence: item.confidence,
+    rotation: item.rotation,
+    layoutBlockId: item.layoutBlockId,
+    layoutLabel: item.layoutLabel,
   };
 }
 

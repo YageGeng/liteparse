@@ -7,8 +7,9 @@ from liteparse._liteparse import LiteParse as _NativeLiteParse
 from liteparse._liteparse import search_items as _native_search_items
 
 from .types import (
-    LiteParseConfig,
+    ExtractedImage,
     LayoutBlock,
+    LiteParseConfig,
     ParsedPage,
     ParseError,
     ParseResult,
@@ -31,8 +32,8 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                 font_name=item.font_name,
                 font_size=item.font_size,
                 confidence=item.confidence,
-                layout_block_id=item.layout_block_id,
-                layout_label=item.layout_label,
+                layout_block_id=getattr(item, "layout_block_id", None),
+                layout_label=getattr(item, "layout_label", None),
             )
             for item in native_page.text_items
         ]
@@ -45,9 +46,9 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                 y=block.y,
                 width=block.width,
                 height=block.height,
-                text=block.text,
+                text=getattr(block, "text", ""),
             )
-            for block in native_page.layout_blocks
+            for block in getattr(native_page, "layout_blocks", [])
         ]
         pages.append(
             ParsedPage(
@@ -59,9 +60,19 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                 layout_blocks=layout_blocks,
             )
         )
+    images = [
+        ExtractedImage(
+            id=img.id,
+            page=img.page,
+            format=img.format,
+            bytes=img.bytes,
+        )
+        for img in getattr(native_result, "images", [])
+    ]
     return ParseResult(
         pages=pages,
         text=native_result.text,
+        images=images,
     )
 
 
@@ -93,6 +104,8 @@ class LiteParse:
         password: Optional[str] = None,
         quiet: Optional[bool] = None,
         num_workers: Optional[int] = None,
+        image_mode: Optional[str] = None,
+        extract_links: Optional[bool] = None,
         layout_enabled: Optional[bool] = None,
         layout_confidence_threshold: Optional[float] = None,
         layout_iou_threshold: Optional[float] = None,
@@ -109,11 +122,14 @@ class LiteParse:
             max_pages: Maximum number of pages to parse
             target_pages: Specific pages to parse (e.g., "1-5,10,15-20")
             dpi: DPI for rendering (affects OCR quality)
-            output_format: Output format: "json", "markdown", or "text" (default: "json")
+            output_format: Output format: "json", "text", or "markdown" (default: "json")
             preserve_very_small_text: Whether to preserve very small text
             password: Password for encrypted/protected documents
             quiet: Suppress progress output
             num_workers: Number of concurrent OCR workers (default: CPU cores - 1)
+            image_mode: How to surface raster images in markdown output
+            extract_links: Render hyperlink annotations as ``[text](url)`` in
+                markdown output (default: True). Set False for plain anchor text.
             layout_enabled: Whether to enable YOLO document layout detection
             layout_confidence_threshold: Minimum layout detection confidence score
             layout_iou_threshold: IoU threshold for layout detection NMS
@@ -144,6 +160,10 @@ class LiteParse:
             kwargs["quiet"] = quiet
         if num_workers is not None:
             kwargs["num_workers"] = num_workers
+        if image_mode is not None:
+            kwargs["image_mode"] = image_mode
+        if extract_links is not None:
+            kwargs["extract_links"] = extract_links
         if layout_enabled is not None:
             kwargs["layout_enabled"] = layout_enabled
         if layout_confidence_threshold is not None:
@@ -285,10 +305,10 @@ class LiteParse:
             password=cfg.password,
             quiet=cfg.quiet,
             num_workers=cfg.num_workers,
-            layout_enabled=cfg.layout_enabled,
-            layout_confidence_threshold=cfg.layout_confidence_threshold,
-            layout_iou_threshold=cfg.layout_iou_threshold,
-            layout_image_size=cfg.layout_image_size,
+            layout_enabled=getattr(cfg, "layout_enabled", False),
+            layout_confidence_threshold=getattr(cfg, "layout_confidence_threshold", 0.25),
+            layout_iou_threshold=getattr(cfg, "layout_iou_threshold", 0.45),
+            layout_image_size=getattr(cfg, "layout_image_size", 1280),
         )
 
     def __repr__(self) -> str:
@@ -327,8 +347,8 @@ def search_items(
             font_name=item.font_name,
             font_size=item.font_size,
             confidence=item.confidence,
-            layout_block_id=item.layout_block_id,
-            layout_label=item.layout_label,
+            layout_block_id=getattr(item, "layout_block_id", None),
+            layout_label=getattr(item, "layout_label", None),
         )
         for item in native_results
     ]
