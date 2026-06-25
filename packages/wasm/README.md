@@ -72,6 +72,7 @@ All optional, camelCase:
 | `password` | `string` | — | Password for protected PDFs |
 | `quiet` | `boolean` | `false` | Suppress progress logging |
 | `ocrEngine` | `object` | — | JS-side OCR engine (see below) |
+| `layoutProvider` | `object \| "yolo"` | — | JS-side layout detector, or built-in YOLO when built with `layout-yolo-webgpu` |
 
 ## OCR in the browser
 
@@ -98,6 +99,49 @@ const parser = new LiteParse({
   },
 });
 ```
+
+## YOLO layout in the browser
+
+The published default build does not bundle the YOLO model. To build a browser
+package with the embedded Burn/ONNX YOLO detector, first export the ONNX model:
+
+```sh
+uv run python scripts/export-yolo-layout-onnx.py --variant n
+```
+
+The script always writes `models/yolo26_doc_layout.onnx`; rerun it with another
+variant to replace the model used by the next wasm build.
+
+Then build the wasm package with WebGPU layout support:
+
+```sh
+# from packages/wasm
+npm run build:yolo-webgpu
+```
+
+To switch to a larger variant, rerun the export and rebuild:
+
+```sh
+uv run python scripts/export-yolo-layout-onnx.py --variant m
+cd packages/wasm
+npm run build:yolo-webgpu
+```
+
+Use `layoutProvider: "yolo"` to enable the built-in detector:
+
+```ts
+const parser = new LiteParse({
+  outputFormat: "json",
+  layoutProvider: "yolo",
+});
+
+const result = await parser.parse(bytes);
+console.log(result.pages[0].layoutBlocks);
+```
+
+The core parser also supports custom JS layout providers through
+`layoutProvider.detectPage(imageData, page)`, which should return layout blocks
+with `{ label, confidence, x, y, width, height }`.
 
 ## Building from source
 

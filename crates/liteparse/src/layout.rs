@@ -59,7 +59,7 @@ pub trait LayoutProvider: Send + Sync {
 
 /// External document-layout detector used to provide page-level layout hints.
 #[cfg(target_arch = "wasm32")]
-pub trait LayoutProvider: Send + Sync {
+pub trait LayoutProvider {
     fn name(&self) -> &str;
 
     fn detect_page<'a>(&'a self, page: &'a LayoutPageImage) -> LayoutProviderFuture<'a>;

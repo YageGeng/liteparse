@@ -1,0 +1,53 @@
+[package]
+name = "liteparse-layout"
+version = "0.1.0"
+edition.workspace = true
+description = "YOLO document layout detection support for LiteParse"
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+burn = {
+  package = "burn-core",
+  version = "0.21",
+  default-features = false,
+  features = ["std"]
+}
+burn-ndarray = {
+  version = "0.21",
+  default-features = false,
+  features = ["std"]
+}
+burn-nn = { version = "0.21", default-features = false, features = ["std"] }
+burn-store = {
+  version = "0.21",
+  default-features = false,
+  features = ["burnpack", "std"]
+}
+burn-wgpu = {
+  version = "0.21",
+  default-features = false,
+  features = ["std"],
+  optional = true
+}
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2"
+tokio = {
+  version = "1.52.3",
+  default-features = false,
+  features = ["sync"],
+  optional = true
+}
+
+[dev-dependencies]
+serde_json = "1.0.145"
+
+[build-dependencies]
+burn-onnx = "=0.21.0"
+
+[features]
+default = ["backend-ndarray"]
+backend-metal = ["burn-wgpu/metal", "dep:burn-wgpu"]
+backend-ndarray = []
+backend-vulkan = ["burn-wgpu/vulkan", "dep:burn-wgpu"]
+backend-webgpu = ["burn-wgpu/webgpu", "dep:burn-wgpu", "dep:tokio"]

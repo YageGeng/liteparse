@@ -1,0 +1,19 @@
+[package]
+name = "liteparse-layout-provider"
+version = "0.1.0"
+edition.workspace = true
+description = "YOLO layout provider adapter for LiteParse"
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+liteparse = { path = "../liteparse", default-features = false }
+liteparse-layout = { path = "../liteparse-layout", default-features = false, optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+
+[features]
+default = []
+backend-metal = ["dep:liteparse-layout", "liteparse-layout/backend-metal"]
+backend-ndarray = ["dep:liteparse-layout", "liteparse-layout/backend-ndarray"]
+backend-vulkan = ["dep:liteparse-layout", "liteparse-layout/backend-vulkan"]
+backend-webgpu = ["dep:liteparse-layout", "dep:wasm-bindgen", "liteparse-layout/backend-webgpu"]

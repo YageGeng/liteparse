@@ -41,6 +41,5 @@ pub mod ocr_merge;
 pub mod output;
 #[doc(hidden)]
 pub mod projection;
-#[cfg(not(target_arch = "wasm32"))]
 #[doc(hidden)]
 pub mod render;

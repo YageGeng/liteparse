@@ -1,0 +1,692 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>LiteParse YOLO Layout Demo</title>
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+      }
+
+      :root {
+        --bg: #f4f6f8;
+        --panel: #ffffff;
+        --ink: #111827;
+        --muted: #667085;
+        --line: #d7dde5;
+        --black: #050505;
+        --blue: #2563eb;
+        --cyan: #0891b2;
+        --green: #16a34a;
+        --orange: #ea580c;
+        --pink: #db2777;
+        --red: #dc2626;
+        --violet: #7c3aed;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+        --sans:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--sans);
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        min-height: 60px;
+        padding: 0 20px;
+        background: var(--black);
+        color: #fff;
+      }
+
+      header h1 {
+        margin: 0;
+        font-family: var(--mono);
+        font-size: 15px;
+        font-weight: 600;
+      }
+
+      header nav {
+        display: flex;
+        gap: 14px;
+        margin-left: auto;
+      }
+
+      header a {
+        color: #c7d2fe;
+        font-family: var(--mono);
+        font-size: 12px;
+        text-decoration: none;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+        gap: 16px;
+        width: min(1440px, 100%);
+        margin: 0 auto;
+        padding: 16px;
+      }
+
+      aside,
+      .workspace {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+
+      aside {
+        align-self: start;
+        overflow: hidden;
+      }
+
+      section {
+        padding: 14px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      section:last-child {
+        border-bottom: 0;
+      }
+
+      h2,
+      h3 {
+        margin: 0 0 10px;
+        font-size: 14px;
+      }
+
+      .drop-zone {
+        position: relative;
+        display: grid;
+        place-items: center;
+        min-height: 148px;
+        border: 2px dashed var(--line);
+        border-radius: 8px;
+        background: #fbfcfd;
+        text-align: center;
+      }
+
+      .drop-zone.dragover {
+        border-color: var(--blue);
+        background: #eff6ff;
+      }
+
+      .drop-zone input {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        cursor: pointer;
+      }
+
+      .drop-zone strong {
+        display: block;
+        margin-bottom: 4px;
+      }
+
+      .drop-zone span,
+      .hint,
+      label {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .status {
+        min-height: 20px;
+        margin-top: 10px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .status.success {
+        color: var(--green);
+      }
+
+      .status.error {
+        color: var(--red);
+      }
+
+      .field {
+        display: grid;
+        gap: 6px;
+        margin-bottom: 10px;
+      }
+
+      select,
+      button {
+        min-height: 34px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fff;
+        color: var(--ink);
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      button:disabled,
+      select:disabled {
+        cursor: not-allowed;
+        opacity: 0.5;
+      }
+
+      .button-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 8px;
+      }
+
+      .stats {
+        display: grid;
+        gap: 6px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+
+      .stats strong {
+        color: var(--ink);
+      }
+
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11px;
+      }
+
+      .swatch {
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+      }
+
+      .json {
+        max-height: 300px;
+        margin: 0;
+        overflow: auto;
+        padding: 10px;
+        border-radius: 6px;
+        background: #111417;
+        color: #d8dee9;
+        font-family: var(--mono);
+        font-size: 11px;
+        line-height: 1.45;
+        white-space: pre;
+      }
+
+      .workspace {
+        min-height: calc(100vh - 92px);
+        padding: 16px;
+        overflow: auto;
+      }
+
+      .page-shell {
+        display: grid;
+        justify-items: center;
+        gap: 16px;
+      }
+
+      .page {
+        position: relative;
+        width: min(100%, 920px);
+        background: #fff;
+        border: 1px solid #cbd5e1;
+        box-shadow: 0 18px 42px rgb(15 23 42 / 12%);
+        overflow: hidden;
+      }
+
+      .empty {
+        display: grid;
+        place-items: center;
+        min-height: 420px;
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+
+      .text-box,
+      .layout-box,
+      .page-image {
+        position: absolute;
+      }
+
+      .page-image {
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: fill;
+        user-select: none;
+      }
+
+      .text-box {
+        border: 1px solid rgb(15 23 42 / 12%);
+        background: rgb(15 23 42 / 4%);
+      }
+
+      .layout-box {
+        border: 2px solid currentColor;
+        background: color-mix(in srgb, currentColor 12%, transparent);
+      }
+
+      .layout-label {
+        position: absolute;
+        left: -2px;
+        top: -23px;
+        max-width: calc(100% + 4px);
+        min-height: 21px;
+        padding: 2px 5px;
+        border-left: 3px solid var(--label-color);
+        background: rgb(17 24 39 / 94%);
+        color: #f9fafb;
+        font-family: var(--mono);
+        font-size: 10px;
+        line-height: 17px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .notice {
+        padding: 10px;
+        border: 1px solid #fed7aa;
+        border-radius: 6px;
+        background: #fff7ed;
+        color: #9a3412;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      code {
+        font-family: var(--mono);
+      }
+
+      @media (max-width: 900px) {
+        main {
+          grid-template-columns: 1fr;
+        }
+
+        .workspace {
+          min-height: 460px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>LiteParse YOLO Layout Demo</h1>
+      <nav>
+        <a href="./index.html">Basic parser</a>
+        <a href="../packages/wasm/pkg/">Local pkg</a>
+      </nav>
+    </header>
+
+    <main>
+      <aside>
+        <section>
+          <h2>Input</h2>
+          <div class="drop-zone" id="drop-zone">
+            <input type="file" id="pdf-input" accept=".pdf" />
+            <div>
+              <strong>Drop a PDF</strong>
+              <span>or click to choose one</span>
+            </div>
+          </div>
+          <div class="status" id="status">Loading local WASM module...</div>
+        </section>
+
+        <section>
+          <h3>Controls</h3>
+          <div class="field">
+            <label for="page-select">Page</label>
+            <select id="page-select" disabled></select>
+          </div>
+          <div class="button-row">
+            <button id="toggle-text" disabled>Text boxes: On</button>
+            <button id="toggle-labels" disabled>Labels: Off</button>
+            <button id="copy-json" disabled>Copy JSON</button>
+          </div>
+        </section>
+
+        <section>
+          <h3>Stats</h3>
+          <div class="stats" id="stats">
+            <span><strong>0</strong> pages</span>
+            <span><strong>0</strong> layout blocks</span>
+          </div>
+        </section>
+
+        <section>
+          <h3>Labels</h3>
+          <div class="legend" id="legend"></div>
+        </section>
+
+        <section>
+          <h3>Build</h3>
+          <div class="notice">
+            Build first with <code>npm run build:yolo-webgpu</code> from <code>packages/wasm</code>,
+            then serve the repo root.
+          </div>
+        </section>
+
+        <section>
+          <h3>Current page JSON</h3>
+          <pre class="json" id="json-output">{}</pre>
+        </section>
+      </aside>
+
+      <div class="workspace">
+        <div class="page-shell" id="page-shell">
+          <div class="empty">Upload a PDF to run WebGPU YOLO layout detection.</div>
+        </div>
+      </div>
+    </main>
+
+    <script type="module">
+      const statusEl = document.getElementById("status");
+      const dropZone = document.getElementById("drop-zone");
+      const fileInput = document.getElementById("pdf-input");
+      const pageSelect = document.getElementById("page-select");
+      const pageShell = document.getElementById("page-shell");
+      const statsEl = document.getElementById("stats");
+      const legendEl = document.getElementById("legend");
+      const jsonOutput = document.getElementById("json-output");
+      const copyJson = document.getElementById("copy-json");
+      const toggleText = document.getElementById("toggle-text");
+      const toggleLabels = document.getElementById("toggle-labels");
+
+      const colors = new Map();
+      const palette = [
+        "#2563eb",
+        "#0891b2",
+        "#db2777",
+        "#ea580c",
+        "#16a34a",
+        "#7c3aed",
+        "#475569",
+        "#dc2626",
+      ];
+
+      let LiteParse;
+      let parser;
+      let lastResult;
+      let currentBytes;
+      let renderSequence = 0;
+      let showTextBoxes = true;
+      let showLayoutLabels = false;
+      const pageImageUrls = new Map();
+
+      function setStatus(message, type = "") {
+        statusEl.textContent = message;
+        statusEl.className = `status ${type}`;
+      }
+
+      function colorFor(label) {
+        if (!colors.has(label)) {
+          colors.set(label, palette[colors.size % palette.length]);
+        }
+        return colors.get(label);
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;");
+      }
+
+      async function loadWasm() {
+        if (!("gpu" in navigator)) {
+          setStatus("WebGPU is not available in this browser.", "error");
+          return;
+        }
+
+        const moduleUrl = new URL("../packages/wasm/pkg/liteparse_wasm.js", window.location.href);
+        const wasmUrl = new URL(
+          "../packages/wasm/pkg/liteparse_wasm_bg.wasm",
+          window.location.href
+        );
+        const mod = await import(moduleUrl.href);
+        await mod.default({ module_or_path: wasmUrl.href });
+        LiteParse = mod.LiteParse;
+        parser = new LiteParse({
+          ocrEnabled: false,
+          outputFormat: "json",
+          quiet: true,
+          layoutProvider: "yolo",
+        });
+        setStatus("Ready. Drop a PDF to run YOLO layout detection.", "success");
+      }
+
+      function positionElement(el, box, page) {
+        el.style.left = `${(box.x / page.width) * 100}%`;
+        el.style.top = `${(box.y / page.height) * 100}%`;
+        el.style.width = `${(box.width / page.width) * 100}%`;
+        el.style.height = `${(box.height / page.height) * 100}%`;
+      }
+
+      function renderLegend(blocks) {
+        const labels = [...new Set(blocks.map((block) => block.label))];
+        legendEl.innerHTML = labels
+          .map(
+            (label) =>
+              `<span><i class="swatch" style="background:${colorFor(label)}"></i>${escapeHtml(label)}</span>`
+          )
+          .join("");
+      }
+
+      function clearPageImageCache() {
+        for (const url of pageImageUrls.values()) {
+          URL.revokeObjectURL(url);
+        }
+        pageImageUrls.clear();
+      }
+
+      async function pageImageUrl(pageNum) {
+        if (pageImageUrls.has(pageNum)) {
+          return pageImageUrls.get(pageNum);
+        }
+
+        const rendered = await parser.renderPages(currentBytes, [pageNum]);
+        const pageImage = rendered[0];
+        if (!pageImage) {
+          throw new Error(`No rendered image returned for page ${pageNum}`);
+        }
+
+        const bytes = new Uint8Array(pageImage.imageBytes);
+        const blob = new Blob([bytes], { type: "image/png" });
+        const url = URL.createObjectURL(blob);
+        pageImageUrls.set(pageNum, url);
+        return url;
+      }
+
+      async function renderPage(page, sequence) {
+        pageShell.innerHTML = "";
+        const pageEl = document.createElement("div");
+        pageEl.className = "page";
+        pageEl.style.aspectRatio = `${page.width} / ${page.height}`;
+
+        const imageUrl = await pageImageUrl(page.pageNum);
+        if (sequence !== renderSequence) return;
+
+        const imageEl = document.createElement("img");
+        imageEl.className = "page-image";
+        imageEl.src = imageUrl;
+        imageEl.alt = `Page ${page.pageNum}`;
+        pageEl.append(imageEl);
+
+        if (showTextBoxes) {
+          for (const item of page.textItems || []) {
+            const textEl = document.createElement("div");
+            textEl.className = "text-box";
+            positionElement(textEl, item, page);
+            pageEl.append(textEl);
+          }
+        }
+
+        for (const block of page.layoutBlocks || []) {
+          const blockEl = document.createElement("div");
+          blockEl.className = "layout-box";
+          const labelColor = colorFor(block.label);
+          blockEl.style.color = labelColor;
+          blockEl.style.setProperty("--label-color", labelColor);
+          positionElement(blockEl, block, page);
+
+          if (showLayoutLabels) {
+            const labelEl = document.createElement("div");
+            labelEl.className = "layout-label";
+            labelEl.textContent = `${block.id} ${block.label} ${(block.confidence * 100).toFixed(0)}%`;
+            blockEl.append(labelEl);
+          }
+          pageEl.append(blockEl);
+        }
+
+        pageShell.append(pageEl);
+      }
+
+      async function renderResult() {
+        if (!lastResult) return;
+        const sequence = ++renderSequence;
+        const page = lastResult.pages[Number(pageSelect.value || 0)];
+        if (!page) return;
+
+        const pageBlocks = page.layoutBlocks || [];
+        const totalBlocks = lastResult.pages.reduce(
+          (sum, current) => sum + (current.layoutBlocks || []).length,
+          0
+        );
+
+        await renderPage(page, sequence);
+        if (sequence !== renderSequence) return;
+        renderLegend(pageBlocks);
+        jsonOutput.textContent = JSON.stringify(
+          {
+            pageNum: page.pageNum,
+            width: page.width,
+            height: page.height,
+            layoutBlocks: pageBlocks,
+          },
+          null,
+          2
+        );
+        statsEl.innerHTML = [
+          `<span><strong>${lastResult.pages.length}</strong> pages</span>`,
+          `<span><strong>${pageBlocks.length}</strong> blocks on page</span>`,
+          `<span><strong>${totalBlocks}</strong> total blocks</span>`,
+        ].join("");
+      }
+
+      async function parseFile(file) {
+        if (!parser) {
+          setStatus("WASM module is not ready.", "error");
+          return;
+        }
+
+        setStatus(`Parsing ${file.name}...`);
+        try {
+          const started = performance.now();
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          currentBytes = bytes;
+          clearPageImageCache();
+          lastResult = await parser.parse(bytes);
+
+          pageSelect.innerHTML = lastResult.pages
+            .map((page, index) => `<option value="${index}">Page ${page.pageNum}</option>`)
+            .join("");
+          pageSelect.disabled = false;
+          copyJson.disabled = false;
+          toggleText.disabled = false;
+          toggleLabels.disabled = false;
+          await renderResult();
+
+          const elapsed = ((performance.now() - started) / 1000).toFixed(2);
+          setStatus(`Parsed ${lastResult.pages.length} page(s) in ${elapsed}s.`, "success");
+        } catch (error) {
+          console.error(error);
+          setStatus(`Parse error: ${error?.message || error}`, "error");
+        }
+      }
+
+      dropZone.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        dropZone.classList.add("dragover");
+      });
+
+      dropZone.addEventListener("dragleave", () => {
+        dropZone.classList.remove("dragover");
+      });
+
+      dropZone.addEventListener("drop", (event) => {
+        event.preventDefault();
+        dropZone.classList.remove("dragover");
+        const file = event.dataTransfer.files[0];
+        if (file) parseFile(file);
+      });
+
+      fileInput.addEventListener("change", (event) => {
+        const file = event.target.files[0];
+        if (file) parseFile(file);
+      });
+
+      pageSelect.addEventListener("change", () => {
+        renderResult().catch((error) => {
+          console.error(error);
+          setStatus(`Render error: ${error?.message || error}`, "error");
+        });
+      });
+
+      toggleText.addEventListener("click", () => {
+        showTextBoxes = !showTextBoxes;
+        toggleText.textContent = `Text boxes: ${showTextBoxes ? "On" : "Off"}`;
+        renderResult().catch((error) => {
+          console.error(error);
+          setStatus(`Render error: ${error?.message || error}`, "error");
+        });
+      });
+
+      toggleLabels.addEventListener("click", () => {
+        showLayoutLabels = !showLayoutLabels;
+        toggleLabels.textContent = `Labels: ${showLayoutLabels ? "On" : "Off"}`;
+        renderResult().catch((error) => {
+          console.error(error);
+          setStatus(`Render error: ${error?.message || error}`, "error");
+        });
+      });
+
+      copyJson.addEventListener("click", async () => {
+        await navigator.clipboard.writeText(jsonOutput.textContent);
+        copyJson.textContent = "Copied";
+        setTimeout(() => {
+          copyJson.textContent = "Copy JSON";
+        }, 1000);
+      });
+
+      loadWasm().catch((error) => {
+        console.error(error);
+        setStatus(`Failed to load local WASM: ${error?.message || error}`, "error");
+      });
+    </script>
+  </body>
+</html>

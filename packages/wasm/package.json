@@ -19,9 +19,10 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "wasm-pack build ../../crates/liteparse-wasm --release --target web --out-dir ../../packages/wasm/pkg --out-name liteparse_wasm && node scripts/patch-wasi-imports.js",
-    "build:bundler": "wasm-pack build ../../crates/liteparse-wasm --release --target bundler --out-dir ../../packages/wasm/pkg --out-name liteparse_wasm && node scripts/patch-wasi-imports.js",
-    "build:nodejs": "wasm-pack build ../../crates/liteparse-wasm --release --target nodejs --out-dir ../../packages/wasm/pkg --out-name liteparse_wasm && node scripts/patch-wasi-imports.js",
+    "build": "node scripts/build.js web",
+    "build:bundler": "node scripts/build.js bundler",
+    "build:nodejs": "node scripts/build.js nodejs",
+    "build:yolo-webgpu": "node scripts/build.js web layout-yolo-webgpu",
     "clean": "rm -rf pkg",
     "prepublishOnly": "npm run build"
   },

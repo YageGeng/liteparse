@@ -19,8 +19,11 @@ use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
 use liteparse::layout::{LayoutPageImage, LayoutProvider, LayoutProviderFuture};
 use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult};
 use liteparse::parser::LiteParse as CoreLiteParse;
+use liteparse::render;
 use liteparse::search;
 use liteparse::types::{LayoutBlock, PdfInput};
+#[cfg(feature = "layout-yolo-webgpu")]
+use liteparse_layout_provider::{YoloLayoutOptions, YoloLayoutProvider};
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -178,6 +181,7 @@ struct JsParsedPage<'a> {
     height: f32,
     text: &'a str,
     text_items: Vec<JsTextItem<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     layout_blocks: Vec<JsLayoutBlock<'a>>,
 }
 
@@ -199,6 +203,15 @@ struct JsExtractedImage<'a> {
     /// wrap with `new Uint8Array(image.bytes)`. (Could be upgraded to a real
     /// Uint8Array later by switching to a hand-rolled to_value path.)
     bytes: &'a [u8],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsRenderedPage<'a> {
+    page_num: u32,
+    width: u32,
+    height: u32,
+    image_bytes: &'a [u8],
 }
 
 #[derive(Serialize)]
@@ -477,8 +490,11 @@ impl LiteParse {
             parser = parser.with_ocr_engine(std::sync::Arc::new(JsOcrEngine::new(js_engine)));
         }
         if let Some(js_provider) = layout_provider_js {
-            parser = parser
-                .with_layout_provider(std::sync::Arc::new(JsLayoutProvider::new(js_provider)));
+            parser = if js_provider.as_string().as_deref() == Some("yolo") {
+                parser.with_layout_provider(create_builtin_yolo_layout_provider()?)
+            } else {
+                parser.with_layout_provider(std::sync::Arc::new(JsLayoutProvider::new(js_provider)))
+            };
         }
         Ok(LiteParse {
             inner: parser,
@@ -552,6 +568,32 @@ impl LiteParse {
             .map_err(|e| JsError::new(&format!("serialize result failed: {}", e)))
     }
 
+    /// Render selected PDF pages to PNG bytes. `pageNumbers` is an optional number array.
+    #[wasm_bindgen(js_name = renderPages)]
+    pub fn render_pages(&self, data: Vec<u8>, page_numbers: JsValue) -> Result<JsValue, JsError> {
+        let page_numbers = parse_page_numbers(page_numbers)?;
+        let rendered = render::render_pages_to_png(
+            &PdfInput::Bytes(data),
+            page_numbers.as_deref(),
+            self.config.dpi,
+            self.config.password.as_deref(),
+        )
+        .map_err(|e| JsError::new(&format!("render pages failed: {}", e)))?;
+
+        let js_pages: Vec<JsRenderedPage<'_>> = rendered
+            .iter()
+            .map(|page| JsRenderedPage {
+                page_num: page.page_num,
+                width: page.width,
+                height: page.height,
+                image_bytes: &page.png_bytes,
+            })
+            .collect();
+
+        serde_wasm_bindgen::to_value(&js_pages)
+            .map_err(|e| JsError::new(&format!("serialize rendered pages failed: {}", e)))
+    }
+
     /// Determine per-page complexity for the given PDF bytes. Returns
     /// `Promise<PageComplexityStats[]>` — a cheap pre-OCR check with per-page
     /// signals and a `needsOcr` verdict.
@@ -569,6 +611,31 @@ impl LiteParse {
         serde_wasm_bindgen::to_value(&js_stats)
             .map_err(|e| JsError::new(&format!("serialize result failed: {}", e)))
     }
+}
+
+fn parse_page_numbers(value: JsValue) -> Result<Option<Vec<u32>>, JsError> {
+    if value.is_undefined() || value.is_null() {
+        return Ok(None);
+    }
+
+    serde_wasm_bindgen::from_value(value)
+        .map(Some)
+        .map_err(|e| JsError::new(&format!("invalid pageNumbers: {}", e)))
+}
+
+#[cfg(feature = "layout-yolo-webgpu")]
+#[allow(clippy::arc_with_non_send_sync)]
+fn create_builtin_yolo_layout_provider() -> Result<std::sync::Arc<dyn LayoutProvider>, JsError> {
+    Ok(std::sync::Arc::new(YoloLayoutProvider::lazy(
+        YoloLayoutOptions::default(),
+    )))
+}
+
+#[cfg(not(feature = "layout-yolo-webgpu"))]
+fn create_builtin_yolo_layout_provider() -> Result<std::sync::Arc<dyn LayoutProvider>, JsError> {
+    Err(JsError::new(
+        "layoutProvider: 'yolo' requires the layout-yolo-webgpu feature",
+    ))
 }
 
 #[derive(Serialize)]
