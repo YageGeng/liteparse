@@ -233,6 +233,12 @@ pub struct PdfiumBindings {
     pub FPDFFont_GetGlyphWidth: unsafe extern "C" fn(FPDF_FONT, u32, f32, *mut f32) -> FPDF_BOOL,
     pub FPDFFont_GetGlyphWidthFromCharCode:
         unsafe extern "C" fn(FPDF_FONT, u32, f32, *mut f32) -> FPDF_BOOL,
+    pub FPDFFont_GetGlyphPathFromCharCode:
+        unsafe extern "C" fn(FPDF_FONT, u32, f32) -> FPDF_GLYPHPATH,
+    pub FPDFGlyphPath_CountGlyphSegments:
+        unsafe extern "C" fn(FPDF_GLYPHPATH) -> std::os::raw::c_int,
+    pub FPDFGlyphPath_GetGlyphPathSegment:
+        unsafe extern "C" fn(FPDF_GLYPHPATH, std::os::raw::c_int) -> FPDF_PATHSEGMENT,
     pub FPDFFont_HasToUnicode: unsafe extern "C" fn(FPDF_FONT) -> FPDF_BOOL,
     pub FPDFFont_GetCharGlyphName: unsafe extern "C" fn(
         FPDF_FONT,
@@ -400,6 +406,9 @@ impl PdfiumBindings {
             FPDFFont_GetDescent: load_fn!(lib, "FPDFFont_GetDescent"),
             FPDFFont_GetGlyphWidth: load_fn!(lib, "FPDFFont_GetGlyphWidth"),
             FPDFFont_GetGlyphWidthFromCharCode: load_fn!(lib, "FPDFFont_GetGlyphWidthFromCharCode"),
+            FPDFFont_GetGlyphPathFromCharCode: load_fn!(lib, "FPDFFont_GetGlyphPathFromCharCode"),
+            FPDFGlyphPath_CountGlyphSegments: load_fn!(lib, "FPDFGlyphPath_CountGlyphSegments"),
+            FPDFGlyphPath_GetGlyphPathSegment: load_fn!(lib, "FPDFGlyphPath_GetGlyphPathSegment"),
             FPDFFont_HasToUnicode: load_fn!(lib, "FPDFFont_HasToUnicode"),
             FPDFFont_GetCharGlyphName: load_fn!(lib, "FPDFFont_GetCharGlyphName"),
             FPDFFont_GetEncoding: load_fn!(lib, "FPDFFont_GetEncoding"),

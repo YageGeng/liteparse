@@ -117,6 +117,54 @@ impl Font {
         if ok != 0 { Some(width) } else { None }
     }
 
+    /// Walk the vector outline of the glyph for `char_code`, returning one
+    /// entry per path segment as `(segment_type, x, y)`. `segment_type` is the
+    /// raw PDFium `FPDF_SEGMENT_*` value (LINETO=0, BEZIERTO=1, MOVETO=2).
+    /// Segments with type `FPDF_SEGMENT_UNKNOWN` (-1) are skipped, and a point
+    /// that cannot be read is reported as `(type, 0.0, 0.0)` — matching the
+    /// platform's `hashGlyphPath` packing convention so a downstream hash of
+    /// these segments reproduces the platform font DB's `pathHash` key.
+    ///
+    /// Returns `None` when the font has no outline for this char code
+    /// (e.g. whitespace / non-rendered glyph), distinct from `Some(vec![])`.
+    pub fn glyph_path_segments(
+        &self,
+        char_code: u32,
+        font_size: f32,
+    ) -> Option<Vec<(i32, f32, f32)>> {
+        let glyph_path = unsafe {
+            ffi!(FPDFFont_GetGlyphPathFromCharCode(
+                self.handle,
+                char_code,
+                font_size
+            ))
+        };
+        if glyph_path.is_null() {
+            return None;
+        }
+        let count = unsafe { ffi!(FPDFGlyphPath_CountGlyphSegments(glyph_path)) };
+        let mut segments = Vec::new();
+        for i in 0..count {
+            let segment = unsafe { ffi!(FPDFGlyphPath_GetGlyphPathSegment(glyph_path, i)) };
+            if segment.is_null() {
+                break;
+            }
+            let seg_type = unsafe { ffi!(FPDFPathSegment_GetType(segment)) };
+            if seg_type == pdfium_sys::FPDF_SEGMENT_UNKNOWN {
+                continue;
+            }
+            let mut x: f32 = 0.0;
+            let mut y: f32 = 0.0;
+            let ok = unsafe { ffi!(FPDFPathSegment_GetPoint(segment, &mut x, &mut y)) };
+            if ok == 0 {
+                x = 0.0;
+                y = 0.0;
+            }
+            segments.push((seg_type, x, y));
+        }
+        Some(segments)
+    }
+
     /// Get glyph width using a Unicode codepoint.
     pub fn glyph_width(&self, unicode: u32, font_size: f32) -> Option<f32> {
         let mut width: f32 = 0.0;

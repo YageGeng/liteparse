@@ -8,3 +8,6 @@ description = "Safe Rust wrapper around PDFium for liteparse"
 
 [dependencies]
 pdfium-sys = { package = "liteparse-pdfium-sys", version = "1.2.0", path = "../pdfium-sys" }
+
+[dev-dependencies]
+blake3 = "1"
