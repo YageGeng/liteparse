@@ -1,4 +1,4 @@
-use crate::types::ParsedPage;
+use crate::types::{LayoutBlock, ParsedPage};
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -23,11 +23,24 @@ pub(crate) struct JsonPage {
     pub height: f32,
     pub text: String,
     pub text_items: Vec<JsonTextItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub layout_blocks: Vec<JsonLayoutBlock>,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ParseResultJson {
     pub pages: Vec<JsonPage>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct JsonLayoutBlock {
+    pub id: usize,
+    pub label: String,
+    pub confidence: f32,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 /// Build structured JSON output from parsed pages.
@@ -54,8 +67,27 @@ pub(crate) fn build_json(pages: &[ParsedPage]) -> ParseResultJson {
                         confidence: item.confidence.or(Some(1.0)),
                     })
                     .collect(),
+                layout_blocks: page
+                    .layout_blocks
+                    .iter()
+                    .map(JsonLayoutBlock::from_layout_block)
+                    .collect(),
             })
             .collect(),
+    }
+}
+
+impl JsonLayoutBlock {
+    fn from_layout_block(block: &LayoutBlock) -> Self {
+        Self {
+            id: block.id,
+            label: block.label.clone(),
+            confidence: block.confidence,
+            x: block.x,
+            y: block.y,
+            width: block.width,
+            height: block.height,
+        }
     }
 }
 
@@ -68,7 +100,7 @@ pub fn format_json(pages: &[ParsedPage]) -> Result<String, serde_json::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ParsedPage, TextItem};
+    use crate::types::{LayoutBlock, ParsedPage, TextItem};
 
     fn item(text: &str, conf: Option<f32>) -> TextItem {
         TextItem {
@@ -91,6 +123,7 @@ mod tests {
             page_height: 792.0,
             text: "txt".into(),
             text_items: items,
+            layout_blocks: vec![],
             projected_lines: vec![],
             regions: crate::types::Region::default(),
             graphics: vec![],
@@ -107,6 +140,13 @@ mod tests {
         assert_eq!(j.pages[0].page, 1);
         assert_eq!(j.pages[0].text_items[0].confidence, Some(1.0));
         assert_eq!(j.pages[0].text_items[0].font_name.as_deref(), Some("Helv"));
+    }
+
+    #[test]
+    fn test_format_json_omits_empty_layout_blocks() {
+        let s = format_json(&[page(vec![item("hi", None)])]).unwrap();
+
+        assert!(!s.contains("layout_blocks"));
     }
 
     #[test]
@@ -127,5 +167,25 @@ mod tests {
     fn test_build_json_empty() {
         let j = build_json(&[]);
         assert!(j.pages.is_empty());
+    }
+
+    #[test]
+    fn test_build_json_includes_layout_blocks_without_replacing_text_items() {
+        let mut page = page(vec![item("hi", None)]);
+        page.layout_blocks = vec![LayoutBlock {
+            id: 0,
+            label: "Text".into(),
+            confidence: 0.91,
+            x: 10.0,
+            y: 20.0,
+            width: 30.0,
+            height: 40.0,
+        }];
+
+        let j = build_json(&[page]);
+
+        assert_eq!(j.pages[0].text_items[0].text, "hi");
+        assert_eq!(j.pages[0].layout_blocks[0].label, "Text");
+        assert_eq!(j.pages[0].layout_blocks[0].confidence, 0.91);
     }
 }

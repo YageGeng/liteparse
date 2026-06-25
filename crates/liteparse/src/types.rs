@@ -69,6 +69,29 @@ pub struct TextItem {
     pub strike: bool,
 }
 
+/// A detected document layout block on a page.
+///
+/// Layout blocks are generic hints supplied by an optional layout provider.
+/// LiteParse core does not attach model-specific meaning to labels; downstream
+/// layout and output code can choose how strongly to trust them.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LayoutBlock {
+    /// Stable page-local id assigned by the provider or adapter.
+    pub id: usize,
+    /// Provider-defined layout class label, e.g. "Text", "Table", or "Title".
+    pub label: String,
+    /// Provider confidence score in the 0.0-1.0 range.
+    pub confidence: f32,
+    /// Left position in viewport-space coordinates.
+    pub x: f32,
+    /// Top position in viewport-space coordinates.
+    pub y: f32,
+    /// Block width in viewport-space coordinates.
+    pub width: f32,
+    /// Block height in viewport-space coordinates.
+    pub height: f32,
+}
+
 #[doc(hidden)]
 #[derive(Debug, Serialize)]
 pub struct Page {
@@ -128,6 +151,8 @@ pub struct ParsedPage {
     pub page_height: f32,
     pub text: String,
     pub text_items: Vec<TextItem>,
+    /// Optional layout blocks supplied by an external layout provider.
+    pub layout_blocks: Vec<LayoutBlock>,
     /// Per-line structural metadata used by the markdown emitter. Not part of
     /// the JSON/text outputs (consumed internally) so it is `#[serde(skip)]`.
     #[serde(skip)]

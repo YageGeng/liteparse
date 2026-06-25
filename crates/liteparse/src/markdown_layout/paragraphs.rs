@@ -77,7 +77,7 @@ pub(super) fn ends_hyphenated(text: &str) -> bool {
 pub(super) fn ends_sentence_final(text: &str) -> bool {
     let t = text
         .trim_end()
-        .trim_end_matches(|c| matches!(c, '"' | '\'' | ')' | ']' | '»' | '”' | '’'));
+        .trim_end_matches(['"', '\'', ')', ']', '»', '”', '’']);
     t.chars()
         .next_back()
         .is_some_and(|c| matches!(c, '.' | '!' | '?'))

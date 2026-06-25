@@ -3,6 +3,7 @@ use crate::config::{LiteParseConfig, parse_target_pages};
 use crate::conversion;
 use crate::error::LiteParseError;
 use crate::extract;
+use crate::layout::LayoutProvider;
 use crate::ocr::OcrEngine;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::ocr::http_simple::HttpOcrEngine;
@@ -63,6 +64,10 @@ pub struct LiteParse {
     /// mechanism for plugging an OCR engine in environments without the
     /// built-ins (e.g. WASM, where the JS side supplies a callback engine).
     ocr_engine_override: Option<std::sync::Arc<dyn OcrEngine>>,
+    /// Optional caller-provided layout provider. When set, pages are rendered
+    /// to RGB during extraction and the provider's blocks are attached to
+    /// `ParsedPage.layout_blocks` before output formatting.
+    layout_provider_override: Option<std::sync::Arc<dyn LayoutProvider>>,
 }
 
 impl LiteParse {
@@ -70,6 +75,7 @@ impl LiteParse {
         Self {
             config,
             ocr_engine_override: None,
+            layout_provider_override: None,
         }
     }
 
@@ -77,6 +83,13 @@ impl LiteParse {
     /// `ocr_server_url` / built-in Tesseract availability.
     pub fn with_ocr_engine(mut self, engine: std::sync::Arc<dyn OcrEngine>) -> Self {
         self.ocr_engine_override = Some(engine);
+        self
+    }
+
+    /// Override the document layout provider. When set, the provider receives
+    /// rendered RGB page images and returns page-space layout blocks.
+    pub fn with_layout_provider(mut self, provider: std::sync::Arc<dyn LayoutProvider>) -> Self {
+        self.layout_provider_override = Some(provider);
         self
     }
 
@@ -286,12 +299,31 @@ impl LiteParse {
         ));
 
         // Grid projection
-        let parsed_pages = projection::project_pages_to_grid(pages);
+        let mut parsed_pages = projection::project_pages_to_grid(pages);
         let t2 = web_time::Instant::now();
         log(&format!(
             "[liteparse] project: {:.1}ms",
             t2.duration_since(t_ocr).as_secs_f64() * 1000.0
         ));
+
+        if let Some(provider) = self.layout_provider_override.clone() {
+            let t_layout = web_time::Instant::now();
+            crate::layout::detect_layout_blocks_for_pages(
+                &validated_input,
+                password,
+                &mut parsed_pages,
+                self.config.dpi,
+                provider,
+            )
+            .await?;
+            log(&format!(
+                "[liteparse] layout: {:.1}ms",
+                web_time::Instant::now()
+                    .duration_since(t_layout)
+                    .as_secs_f64()
+                    * 1000.0
+            ));
+        }
 
         let full_text = if self.config.output_format == crate::config::OutputFormat::Markdown {
             let md = markdown::format_markdown(&parsed_pages, &outline, self.config.image_mode);
@@ -412,6 +444,9 @@ impl LiteParse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::{LayoutPageImage, LayoutProvider, LayoutProviderFuture};
+    use crate::types::LayoutBlock;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     #[allow(clippy::field_reassign_with_default)]
@@ -422,5 +457,57 @@ mod tests {
         let lp = LiteParse::new(cfg);
         assert!(!lp.config().ocr_enabled);
         assert_eq!(lp.config().max_pages, 7);
+    }
+
+    struct FakeLayoutProvider {
+        seen_pages: Arc<Mutex<Vec<(usize, u32, u32)>>>,
+    }
+
+    impl LayoutProvider for FakeLayoutProvider {
+        fn name(&self) -> &str {
+            "fake-layout"
+        }
+
+        fn detect_page<'a>(&'a self, page: &'a LayoutPageImage) -> LayoutProviderFuture<'a> {
+            Box::pin(async move {
+                self.seen_pages
+                    .lock()
+                    .unwrap()
+                    .push((page.page_number, page.width, page.height));
+                Ok(vec![LayoutBlock {
+                    id: 0,
+                    label: "Text".into(),
+                    confidence: 0.9,
+                    x: 1.0,
+                    y: 2.0,
+                    width: page.page_width / 2.0,
+                    height: page.page_height / 2.0,
+                }])
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_input_assigns_layout_provider_blocks() {
+        let seen_pages = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(FakeLayoutProvider {
+            seen_pages: seen_pages.clone(),
+        });
+        let mut cfg = LiteParseConfig::default();
+        cfg.ocr_enabled = false;
+        cfg.max_pages = 1;
+        cfg.quiet = true;
+        let parser = LiteParse::new(cfg).with_layout_provider(provider);
+        let pdf = std::fs::read(format!(
+            "{}/../../integration_tests_data/sample.pdf",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+
+        let result = parser.parse_input(PdfInput::Bytes(pdf)).await.unwrap();
+
+        assert_eq!(seen_pages.lock().unwrap().len(), 1);
+        assert_eq!(result.pages[0].layout_blocks.len(), 1);
+        assert_eq!(result.pages[0].layout_blocks[0].label, "Text");
     }
 }

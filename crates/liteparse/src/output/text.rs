@@ -20,6 +20,7 @@ mod tests {
             page_height: 0.0,
             text: text.into(),
             text_items: vec![],
+            layout_blocks: vec![],
             projected_lines: vec![],
             regions: crate::types::Region::default(),
             graphics: vec![],

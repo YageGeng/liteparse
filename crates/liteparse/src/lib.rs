@@ -9,7 +9,7 @@ pub use config::{LiteParseConfig, OutputFormat};
 pub use error::LiteParseError;
 pub use parser::{LiteParse, ParseResult, ScreenshotResult};
 pub use search::{SearchOptions, search_items};
-pub use types::{ParsedPage, TextItem};
+pub use types::{LayoutBlock, ParsedPage, TextItem};
 
 // ── Modules with user-facing types (visible in docs) ───────────────────
 pub mod config;
@@ -30,6 +30,7 @@ pub mod figure_cluster;
 pub mod font_cmap;
 #[doc(hidden)]
 pub mod glyph_names;
+pub mod layout;
 #[doc(hidden)]
 pub mod markdown_layout;
 #[doc(hidden)]

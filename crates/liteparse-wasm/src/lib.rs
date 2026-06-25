@@ -16,10 +16,11 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
 use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
+use liteparse::layout::{LayoutPageImage, LayoutProvider, LayoutProviderFuture};
 use liteparse::ocr::{OcrEngine, OcrOptions, OcrResult};
 use liteparse::parser::LiteParse as CoreLiteParse;
 use liteparse::search;
-use liteparse::types::PdfInput;
+use liteparse::types::{LayoutBlock, PdfInput};
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -177,6 +178,7 @@ struct JsParsedPage<'a> {
     height: f32,
     text: &'a str,
     text_items: Vec<JsTextItem<'a>>,
+    layout_blocks: Vec<JsLayoutBlock<'a>>,
 }
 
 #[derive(Serialize)]
@@ -197,6 +199,32 @@ struct JsExtractedImage<'a> {
     /// wrap with `new Uint8Array(image.bytes)`. (Could be upgraded to a real
     /// Uint8Array later by switching to a hand-rolled to_value path.)
     bytes: &'a [u8],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsLayoutBlock<'a> {
+    id: usize,
+    label: &'a str,
+    confidence: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+impl<'a> JsLayoutBlock<'a> {
+    fn from_layout_block(block: &'a LayoutBlock) -> Self {
+        Self {
+            id: block.id,
+            label: &block.label,
+            confidence: block.confidence,
+            x: block.x,
+            y: block.y,
+            width: block.width,
+            height: block.height,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +323,118 @@ struct JsOcrResult {
 }
 
 // ---------------------------------------------------------------------------
+// JS layout provider bridge
+// ---------------------------------------------------------------------------
+
+/// Wraps a JS object that exposes
+/// `detectPage(imageData, page): Promise<Array<LayoutBlock>>`.
+struct JsLayoutProvider {
+    name: String,
+    obj: JsValue,
+}
+
+impl JsLayoutProvider {
+    fn new(obj: JsValue) -> Self {
+        Self {
+            name: "js-layout-provider".into(),
+            obj,
+        }
+    }
+}
+
+impl LayoutProvider for JsLayoutProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn detect_page<'a>(&'a self, page: &'a LayoutPageImage) -> LayoutProviderFuture<'a> {
+        let arr = Uint8Array::new_with_length(page.rgb_bytes.len() as u32);
+        arr.copy_from(&page.rgb_bytes);
+        let page_meta = JsLayoutPageMeta::from_page_image(page);
+
+        Box::pin(async move {
+            let detect_page: JsValue = Reflect::get(&self.obj, &JsValue::from_str("detectPage"))
+                .map_err(|e| format!("layoutProvider.detectPage lookup failed: {:?}", e))?;
+            let detect_page: Function = detect_page
+                .dyn_into::<Function>()
+                .map_err(|_| "layoutProvider.detectPage is not a function".to_string())?;
+            let page_meta = serde_wasm_bindgen::to_value(&page_meta)
+                .map_err(|e| format!("layoutProvider page metadata encode failed: {e}"))?;
+
+            let args = js_sys::Array::new();
+            args.push(&arr);
+            args.push(&page_meta);
+
+            let promise = detect_page
+                .apply(&self.obj, &args)
+                .map_err(|e| format!("layoutProvider.detectPage threw: {:?}", e))?;
+            let promise: js_sys::Promise = promise
+                .dyn_into::<js_sys::Promise>()
+                .map_err(|_| "layoutProvider.detectPage did not return a Promise".to_string())?;
+
+            let resolved = JsFuture::from(promise)
+                .await
+                .map_err(|e| format!("layoutProvider.detectPage rejected: {:?}", e))?;
+            let parsed: Vec<JsLayoutBlockResult> = serde_wasm_bindgen::from_value(resolved)
+                .map_err(|e| format!("layoutProvider result decode failed: {:?}", e))?;
+
+            Ok(parsed
+                .into_iter()
+                .enumerate()
+                .map(|(idx, block)| LayoutBlock {
+                    id: block.id.unwrap_or(idx),
+                    label: block.label,
+                    confidence: block.confidence,
+                    x: block.x,
+                    y: block.y,
+                    width: block.width,
+                    height: block.height,
+                })
+                .collect())
+        })
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsLayoutPageMeta {
+    page_index: usize,
+    page_number: usize,
+    width: u32,
+    height: u32,
+    page_width: f32,
+    page_height: f32,
+    dpi: f32,
+}
+
+impl JsLayoutPageMeta {
+    fn from_page_image(page: &LayoutPageImage) -> Self {
+        Self {
+            page_index: page.page_index,
+            page_number: page.page_number,
+            width: page.width,
+            height: page.height,
+            page_width: page.page_width,
+            page_height: page.page_height,
+            dpi: page.dpi,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JsLayoutBlockResult {
+    #[serde(default)]
+    id: Option<usize>,
+    label: String,
+    confidence: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+// ---------------------------------------------------------------------------
 // LiteParse class (JS-facing)
 // ---------------------------------------------------------------------------
 
@@ -317,6 +457,13 @@ impl LiteParse {
         } else {
             None
         };
+        let layout_provider_js = if config.is_object() {
+            Reflect::get(&config, &JsValue::from_str("layoutProvider"))
+                .ok()
+                .filter(|v| !v.is_undefined() && !v.is_null())
+        } else {
+            None
+        };
 
         let js_cfg: JsLiteParseConfig = if config.is_undefined() || config.is_null() {
             JsLiteParseConfig::default()
@@ -328,6 +475,10 @@ impl LiteParse {
         let mut parser = CoreLiteParse::new(core_cfg.clone());
         if let Some(js_engine) = ocr_engine_js {
             parser = parser.with_ocr_engine(std::sync::Arc::new(JsOcrEngine::new(js_engine)));
+        }
+        if let Some(js_provider) = layout_provider_js {
+            parser = parser
+                .with_layout_provider(std::sync::Arc::new(JsLayoutProvider::new(js_provider)));
         }
         Ok(LiteParse {
             inner: parser,
@@ -372,6 +523,11 @@ impl LiteParse {
                         font_size: i.font_size,
                         confidence: i.confidence,
                     })
+                    .collect(),
+                layout_blocks: p
+                    .layout_blocks
+                    .iter()
+                    .map(JsLayoutBlock::from_layout_block)
                     .collect(),
             })
             .collect();
@@ -477,20 +633,11 @@ struct JsSearchTextItem {
     confidence: Option<f32>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct JsSearchOptions {
     phrase: String,
     case_sensitive: bool,
-}
-
-impl Default for JsSearchOptions {
-    fn default() -> Self {
-        Self {
-            phrase: String::new(),
-            case_sensitive: false,
-        }
-    }
 }
 
 /// Search text items for phrase matches, returning merged items with combined bounding boxes.
