@@ -15,7 +15,7 @@ impl TesseractOcrEngine {
         Self { tessdata_path }
     }
 
-    fn normalize_language(lang: &str) -> &str {
+    fn normalize_language_code(lang: &str) -> &str {
         match lang.to_lowercase().trim() {
             "en" => "eng",
             "fr" => "fra",
@@ -32,8 +32,19 @@ impl TesseractOcrEngine {
             "hi" => "hin",
             "th" => "tha",
             "vi" => "vie",
-            _ => lang,
+            _ => lang.trim(),
         }
+    }
+
+    /// Normalize a tesseract language spec, which may be a single code or a
+    /// `+`-separated list (e.g. `ita+eng`). Each component is normalized
+    /// independently and rejoined with `+`.
+    fn normalize_language(lang: &str) -> String {
+        lang.split('+')
+            .filter(|part| !part.trim().is_empty())
+            .map(Self::normalize_language_code)
+            .collect::<Vec<_>>()
+            .join("+")
     }
 }
 
@@ -73,8 +84,10 @@ impl OcrEngine for TesseractOcrEngine {
                 .or_else(|| std::env::var("TESSDATA_PREFIX").ok());
 
             let resolved_path = tessdata_path.unwrap_or_else(default_tessdata_dir);
-            ensure_traineddata(Path::new(&resolved_path), language).await?;
-            api.init(&resolved_path, language)?;
+            for code in language.split('+') {
+                ensure_traineddata(Path::new(&resolved_path), code).await?;
+            }
+            api.init(&resolved_path, &language)?;
 
             // Match the tesseract CLI's default page segmentation mode (PSM_AUTO,
             // i.e. 3). The C++ library's own default when SetPageSegMode is never
@@ -231,6 +244,25 @@ mod tests {
     fn test_normalize_language_passthrough_for_unknown() {
         assert_eq!(TesseractOcrEngine::normalize_language("eng"), "eng");
         assert_eq!(TesseractOcrEngine::normalize_language("xyz"), "xyz");
+    }
+
+    #[test]
+    fn test_normalize_language_multi() {
+        // `+`-separated specs normalize each component independently.
+        assert_eq!(TesseractOcrEngine::normalize_language("ita+eng"), "ita+eng");
+        assert_eq!(TesseractOcrEngine::normalize_language("it+en"), "ita+eng");
+        assert_eq!(
+            TesseractOcrEngine::normalize_language(" it + en "),
+            "ita+eng"
+        );
+        assert_eq!(TesseractOcrEngine::normalize_language("eng+xyz"), "eng+xyz");
+        // Empty components (leading/trailing/double `+`) are dropped.
+        assert_eq!(TesseractOcrEngine::normalize_language("eng+"), "eng");
+        assert_eq!(TesseractOcrEngine::normalize_language("+eng"), "eng");
+        assert_eq!(
+            TesseractOcrEngine::normalize_language("ita++eng"),
+            "ita+eng"
+        );
     }
 
     #[test]
