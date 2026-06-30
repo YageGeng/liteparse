@@ -7,6 +7,17 @@ from typing import Dict, Iterator, List, Optional
 
 
 @dataclass
+class WordBox:
+    """One word's bounding box within a :class:`TextItem`, in the same viewport
+    space (top-left origin, 72 DPI). ``text`` excludes inter-word spaces."""
+    text: str
+    x: float
+    y: float
+    width: float
+    height: float
+
+
+@dataclass
 class TextItem:
     """Individual text item extracted from a document."""
     text: str
@@ -17,6 +28,10 @@ class TextItem:
     font_name: Optional[str] = None
     font_size: Optional[float] = None
     confidence: Optional[float] = None
+    rotation: float = 0.0
+    #: Per-word sub-boxes. Empty unless the parser was configured with
+    #: ``emit_word_boxes=True``.
+    words: List[WordBox] = field(default_factory=list)
 
 
 @dataclass

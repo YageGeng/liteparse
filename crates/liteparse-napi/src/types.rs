@@ -4,7 +4,7 @@ use napi_derive::napi;
 
 use liteparse::config::{ImageMode, LiteParseConfig, OutputFormat};
 use liteparse::parser::ParseResult;
-use liteparse::types::{GraphicPrimitive, Page, ParsedPage, Rect, TextItem};
+use liteparse::types::{GraphicPrimitive, Page, ParsedPage, Rect, TextItem, WordBox};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -55,6 +55,10 @@ pub struct JsLiteParseConfig {
     /// delays (e.g. `[0, 5000, 10000]`) fire duplicate requests per attempt and
     /// take the first success — lower tail latency at the cost of extra load.
     pub ocr_hedge_delays_ms: Option<Vec<u32>>,
+    /// Emit per-word sub-boxes on each text item (`TextItem.words`). Default
+    /// false. Word boxes roughly double the text-item payload, so enable only
+    /// for word-level bbox attribution.
+    pub emit_word_boxes: Option<bool>,
 }
 
 impl JsLiteParseConfig {
@@ -119,6 +123,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.ocr_hedge_delays_ms {
             cfg.ocr_hedge_delays_ms = v.into_iter().map(u64::from).collect();
         }
+        if let Some(v) = self.emit_word_boxes {
+            cfg.emit_word_boxes = v;
+        }
         cfg
     }
 
@@ -158,6 +165,7 @@ impl JsLiteParseConfig {
                     .map(|&v| u32::try_from(v).unwrap_or(u32::MAX))
                     .collect(),
             ),
+            emit_word_boxes: Some(cfg.emit_word_boxes),
         }
     }
 }
@@ -165,6 +173,29 @@ impl JsLiteParseConfig {
 // ---------------------------------------------------------------------------
 // TextItem
 // ---------------------------------------------------------------------------
+
+/// One word's sub-box within a `JsTextItem`, in the same viewport space.
+#[napi(object)]
+#[derive(Clone)]
+pub struct JsWordBox {
+    pub text: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl JsWordBox {
+    pub fn from_rust(word: &WordBox) -> Self {
+        Self {
+            text: word.text.clone(),
+            x: word.x as f64,
+            y: word.y as f64,
+            width: word.width as f64,
+            height: word.height as f64,
+        }
+    }
+}
 
 #[napi(object)]
 #[derive(Clone)]
@@ -179,6 +210,9 @@ pub struct JsTextItem {
     pub confidence: Option<f64>,
     /// Rotation in degrees (viewport space). Defaults to 0 when omitted.
     pub rotation: Option<f64>,
+    /// Per-word sub-boxes for attribution. Empty for items with no word split
+    /// (e.g. OCR-sourced or single-token items).
+    pub words: Vec<JsWordBox>,
 }
 
 impl JsTextItem {
@@ -208,6 +242,7 @@ impl JsTextItem {
             font_name: item.font_name.clone(),
             font_size: item.font_size.map(|v| v as f64),
             confidence: item.confidence.map(|v| v as f64).or(Some(1.0)),
+            words: item.words.iter().map(JsWordBox::from_rust).collect(),
         }
     }
 }

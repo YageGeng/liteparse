@@ -56,6 +56,20 @@ export interface JsLiteParseConfig {
    * take the first success — lower tail latency at the cost of extra load.
    */
   ocrHedgeDelaysMs?: Array<number>
+  /**
+   * Emit per-word sub-boxes on each text item (`TextItem.words`). Default
+   * false. Word boxes roughly double the text-item payload, so enable only
+   * for word-level bbox attribution.
+   */
+  emitWordBoxes?: boolean
+}
+/** One word's sub-box within a `JsTextItem`, in the same viewport space. */
+export interface JsWordBox {
+  text: string
+  x: number
+  y: number
+  width: number
+  height: number
 }
 export interface JsTextItem {
   text: string
@@ -68,6 +82,11 @@ export interface JsTextItem {
   confidence?: number
   /** Rotation in degrees (viewport space). Defaults to 0 when omitted. */
   rotation?: number
+  /**
+   * Per-word sub-boxes for attribution. Empty for items with no word split
+   * (e.g. OCR-sourced or single-token items).
+   */
+  words: Array<JsWordBox>
 }
 /**
  * A vector-graphic primitive supplied by an external extractor. `kind` selects
@@ -136,6 +155,21 @@ export interface JsScreenshotResult {
   height: number
   imageBuffer: Buffer
 }
+export interface JsPageComplexityStats {
+  pageNumber: number
+  textLength: number
+  textCoverage: number
+  hasSubstantialImages: boolean
+  imageBlockCount: number
+  imageCoverage: number
+  largestImageCoverage: number
+  fullPageImage: boolean
+  uncoveredVectorArea?: number
+  isGarbled: boolean
+  pageArea: number
+  needsOcr: boolean
+  reasons: Array<string>
+}
 /** Search text items for phrase matches, returning merged items with combined bounding boxes. */
 export declare function searchItems(items: Array<JsTextItem>, phrase: string, caseSensitive?: boolean | undefined | null): Array<JsTextItem>
 /** Main LiteParse parser class. */
@@ -157,6 +191,13 @@ export declare class LiteParse {
    * font-recovery pipeline).
    */
   parsePages(pages: Array<JsPageInput>): JsParseResult
+  /**
+   * Determine per-page complexity. Returns one entry per parsed page with
+   * signals (text coverage, images, garbled text, vector area) and a
+   * `needsOcr` verdict — a cheap pre-OCR check to decide whether a document
+   * needs advanced parsing. Accepts a file path (string) or raw PDF bytes.
+   */
+  isComplex(input: string | Buffer): Promise<Array<JsPageComplexityStats>>
   /**
    * Take screenshots of document pages. Returns PNG image buffers.
    *

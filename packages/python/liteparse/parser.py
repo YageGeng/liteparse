@@ -15,6 +15,7 @@ from .types import (
     ParseResult,
     ScreenshotResult,
     TextItem,
+    WordBox,
 )
 
 
@@ -32,6 +33,17 @@ def _convert_native_result(native_result: Any) -> ParseResult:
                 font_name=item.font_name,
                 font_size=item.font_size,
                 confidence=item.confidence,
+                rotation=getattr(item, "rotation", 0.0),
+                words=[
+                    WordBox(
+                        text=w.text,
+                        x=w.x,
+                        y=w.y,
+                        width=w.width,
+                        height=w.height,
+                    )
+                    for w in getattr(item, "words", [])
+                ],
             )
             for item in native_page.text_items
         ]
@@ -93,6 +105,7 @@ class LiteParse:
         extract_links: Optional[bool] = None,
         ocr_failure_fatal: Optional[bool] = None,
         ocr_hedge_delays_ms: Optional[List[int]] = None,
+        emit_word_boxes: Optional[bool] = None,
     ):
         """
         Initialize LiteParse parser.
@@ -125,6 +138,10 @@ class LiteParse:
                 ``[0, 5000, 10000]``) each attempt fires a duplicate request at
                 every delay and takes the first to succeed, cancelling the rest
                 — trades extra OCR-server load for lower tail latency.
+            emit_word_boxes: Emit per-word sub-boxes on each text item
+                (``TextItem.words``). Default False. Word boxes roughly double
+                the text-item payload, so enable only for word-level bbox
+                attribution.
         """
         kwargs = {}
         if ocr_enabled is not None:
@@ -161,6 +178,8 @@ class LiteParse:
             kwargs["ocr_failure_fatal"] = ocr_failure_fatal
         if ocr_hedge_delays_ms is not None:
             kwargs["ocr_hedge_delays_ms"] = ocr_hedge_delays_ms
+        if emit_word_boxes is not None:
+            kwargs["emit_word_boxes"] = emit_word_boxes
 
         self._native = _NativeLiteParse(**kwargs)
 

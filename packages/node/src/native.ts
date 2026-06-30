@@ -37,6 +37,15 @@ export interface LiteParseNativeConfig {
   numWorkers?: number;
   ocrFailureFatal?: boolean;
   ocrHedgeDelaysMs?: number[];
+  emitWordBoxes?: boolean;
+}
+
+export interface NativeWordBox {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface NativeTextItem {
@@ -49,6 +58,7 @@ export interface NativeTextItem {
   fontSize?: number;
   confidence?: number;
   rotation?: number;
+  words?: NativeWordBox[];
 }
 
 export interface NativeGraphic {

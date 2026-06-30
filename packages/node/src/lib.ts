@@ -51,6 +51,24 @@ export interface LiteParseConfig {
    * OCR pod, at the cost of extra OCR-server load. HTTP OCR engine only.
    */
   ocrHedgeDelaysMs: number[];
+  /**
+   * Emit per-word sub-boxes on each text item ({@link TextItem.words}).
+   * Default false. Word boxes roughly double the text-item payload (size + napi
+   * marshalling), so enable only when doing word-level bbox attribution.
+   */
+  emitWordBoxes: boolean;
+}
+
+/**
+ * One word's bounding box within a {@link TextItem}, in the same viewport space
+ * (top-left origin, 72 DPI). `text` excludes inter-word spaces.
+ */
+export interface WordBox {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface TextItem {
@@ -64,6 +82,13 @@ export interface TextItem {
   confidence?: number;
   /** Rotation in degrees (viewport space). Defaults to 0 when omitted. */
   rotation?: number;
+  /**
+   * Per-word sub-boxes within this item. A text item groups several words
+   * together (breaking only at line/column boundaries), so this carries the
+   * finer word-level geometry for bbox attribution. Empty/undefined for items
+   * with no word split (e.g. OCR-sourced or single-token items).
+   */
+  words?: WordBox[];
 }
 
 /**
@@ -199,6 +224,7 @@ export class LiteParse {
       numWorkers: userConfig.numWorkers,
       ocrFailureFatal: userConfig.ocrFailureFatal,
       ocrHedgeDelaysMs: userConfig.ocrHedgeDelaysMs,
+      emitWordBoxes: userConfig.emitWordBoxes,
     };
 
     this._native = new native.LiteParse(nativeConfig);
@@ -223,6 +249,7 @@ export class LiteParse {
       numWorkers: resolved.numWorkers ?? 1,
       ocrFailureFatal: resolved.ocrFailureFatal ?? true,
       ocrHedgeDelaysMs: resolved.ocrHedgeDelaysMs ?? [],
+      emitWordBoxes: resolved.emitWordBoxes ?? false,
     };
   }
 
@@ -339,6 +366,8 @@ function toTextItem(item: NativeTextItem): TextItem {
     fontName: item.fontName,
     fontSize: item.fontSize,
     confidence: item.confidence,
+    rotation: item.rotation,
+    words: item.words,
   };
 }
 

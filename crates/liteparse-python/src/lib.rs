@@ -14,6 +14,43 @@ mod cli;
 
 #[pyclass(frozen, from_py_object)]
 #[derive(Clone)]
+struct PyWordBox {
+    #[pyo3(get)]
+    text: String,
+    #[pyo3(get)]
+    x: f64,
+    #[pyo3(get)]
+    y: f64,
+    #[pyo3(get)]
+    width: f64,
+    #[pyo3(get)]
+    height: f64,
+}
+
+#[pymethods]
+impl PyWordBox {
+    fn __repr__(&self) -> String {
+        format!(
+            "WordBox(text={:?}, x={}, y={}, width={}, height={})",
+            self.text, self.x, self.y, self.width, self.height
+        )
+    }
+}
+
+impl PyWordBox {
+    fn from_rust(word: liteparse::types::WordBox) -> Self {
+        Self {
+            text: word.text,
+            x: word.x as f64,
+            y: word.y as f64,
+            width: word.width as f64,
+            height: word.height as f64,
+        }
+    }
+}
+
+#[pyclass(frozen, from_py_object)]
+#[derive(Clone)]
 struct PyTextItem {
     #[pyo3(get)]
     text: String,
@@ -31,6 +68,13 @@ struct PyTextItem {
     font_size: Option<f64>,
     #[pyo3(get)]
     confidence: Option<f64>,
+    /// Rotation in degrees (viewport space). Defaults to 0.
+    #[pyo3(get)]
+    rotation: f64,
+    /// Per-word sub-boxes for attribution. Empty unless the parse was
+    /// configured with `emit_word_boxes=True`.
+    #[pyo3(get)]
+    words: Vec<PyWordBox>,
 }
 
 #[pymethods]
@@ -51,6 +95,7 @@ impl PyTextItem {
             y: self.y as f32,
             width: self.width as f32,
             height: self.height as f32,
+            rotation: self.rotation as f32,
             font_name: self.font_name.clone(),
             font_size: self.font_size.map(|v| v as f32),
             confidence: self.confidence.map(|v| v as f32),
@@ -68,6 +113,8 @@ impl PyTextItem {
             font_name: item.font_name,
             font_size: item.font_size.map(|v| v as f64),
             confidence: item.confidence.map(|v| v as f64).or(Some(1.0)),
+            rotation: item.rotation as f64,
+            words: item.words.into_iter().map(PyWordBox::from_rust).collect(),
         }
     }
 }
@@ -405,6 +452,7 @@ impl LiteParse {
         extract_links = None,
         ocr_failure_fatal = None,
         ocr_hedge_delays_ms = None,
+        emit_word_boxes = None,
     ))]
     fn new(
         ocr_language: Option<String>,
@@ -424,6 +472,7 @@ impl LiteParse {
         extract_links: Option<bool>,
         ocr_failure_fatal: Option<bool>,
         ocr_hedge_delays_ms: Option<Vec<u64>>,
+        emit_word_boxes: Option<bool>,
     ) -> PyResult<Self> {
         let mut cfg = LiteParseConfig::default();
         if let Some(v) = ocr_language {
@@ -484,6 +533,9 @@ impl LiteParse {
         }
         if let Some(v) = ocr_hedge_delays_ms {
             cfg.ocr_hedge_delays_ms = v;
+        }
+        if let Some(v) = emit_word_boxes {
+            cfg.emit_word_boxes = v;
         }
 
         let inner = liteparse::parser::LiteParse::new(cfg.clone());
@@ -615,6 +667,7 @@ fn _liteparse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyExtractedImage>()?;
     m.add_class::<PyParsedPage>()?;
     m.add_class::<PyTextItem>()?;
+    m.add_class::<PyWordBox>()?;
     m.add_class::<PyScreenshotResult>()?;
     m.add_class::<PyPageComplexityStats>()?;
     m.add_function(wrap_pyfunction!(run_cli, m)?)?;

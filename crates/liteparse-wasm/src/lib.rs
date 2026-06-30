@@ -54,6 +54,7 @@ struct JsLiteParseConfig {
     preserve_very_small_text: Option<bool>,
     password: Option<String>,
     quiet: Option<bool>,
+    emit_word_boxes: Option<bool>,
 }
 
 impl JsLiteParseConfig {
@@ -121,6 +122,9 @@ impl JsLiteParseConfig {
         if let Some(v) = self.quiet {
             cfg.quiet = v;
         }
+        if let Some(v) = self.emit_word_boxes {
+            cfg.emit_word_boxes = v;
+        }
         cfg.num_workers = 1;
         Ok(cfg)
     }
@@ -155,6 +159,7 @@ impl JsLiteParseConfig {
             preserve_very_small_text: Some(cfg.preserve_very_small_text),
             password: cfg.password.clone(),
             quiet: Some(cfg.quiet),
+            emit_word_boxes: Some(cfg.emit_word_boxes),
         }
     }
 }
@@ -162,6 +167,16 @@ impl JsLiteParseConfig {
 // ---------------------------------------------------------------------------
 // JS-facing parse result
 // ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JsWordBox<'a> {
+    text: &'a str,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -177,6 +192,12 @@ struct JsTextItem<'a> {
     font_size: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     confidence: Option<f32>,
+    /// Rotation in degrees (viewport space).
+    rotation: f32,
+    /// Per-word sub-boxes for attribution. Omitted when empty (the default —
+    /// only populated when parsing with `emitWordBoxes: true`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    words: Vec<JsWordBox<'a>>,
 }
 
 #[derive(Serialize)]
@@ -381,6 +402,18 @@ impl LiteParse {
                         font_name: i.font_name.as_deref(),
                         font_size: i.font_size,
                         confidence: i.confidence,
+                        rotation: i.rotation,
+                        words: i
+                            .words
+                            .iter()
+                            .map(|w| JsWordBox {
+                                text: &w.text,
+                                x: w.x,
+                                y: w.y,
+                                width: w.width,
+                                height: w.height,
+                            })
+                            .collect(),
                     })
                     .collect(),
             })
@@ -543,6 +576,18 @@ pub fn search_items(items: JsValue, options: JsValue) -> Result<JsValue, JsError
             font_name: i.font_name.as_deref(),
             font_size: i.font_size,
             confidence: i.confidence,
+            rotation: i.rotation,
+            words: i
+                .words
+                .iter()
+                .map(|w| JsWordBox {
+                    text: &w.text,
+                    x: w.x,
+                    y: w.y,
+                    width: w.width,
+                    height: w.height,
+                })
+                .collect(),
         })
         .collect();
 

@@ -171,6 +171,7 @@ impl LiteParse {
             false, // render_images: image rasters not needed for complexity
             false, // extract_links: irrelevant for complexity stats
             self.glyph_resolver.as_deref(),
+            false, // emit_word_boxes: word boxes not needed for complexity stats
         )?;
         let t_extract = web_time::Instant::now();
         log(&format!(
@@ -296,6 +297,7 @@ impl LiteParse {
                 self.config.extract_links
                     && self.config.output_format == crate::config::OutputFormat::Markdown,
                 self.glyph_resolver.as_deref(),
+                self.config.emit_word_boxes,
             )?;
             let t_extract = web_time::Instant::now();
             log(&format!(

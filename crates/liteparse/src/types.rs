@@ -67,6 +67,27 @@ pub struct TextItem {
     /// markdown emitter to wrap the text in `~~…~~`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub strike: bool,
+    /// Per-word sub-boxes within this item, split on the inter-word spaces seen
+    /// during segment building. A segment groups several words together (it only
+    /// breaks at line/column boundaries), so this exposes the finer word-level
+    /// geometry needed for bbox attribution. Empty for items that produced no
+    /// word split (e.g. OCR-sourced or single-token items). Internal/attribution
+    /// use only — `#[serde(skip)]` keeps it out of the JSON output but it is
+    /// marshalled across the napi boundary.
+    #[serde(skip)]
+    pub words: Vec<WordBox>,
+}
+
+/// One word's bounding box within a `TextItem`, in the same viewport space
+/// (top-left origin, 72 DPI) as the parent item. `text` is the word's content
+/// with inter-word spaces excluded.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct WordBox {
+    pub text: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
 }
 
 #[doc(hidden)]

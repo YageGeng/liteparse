@@ -6,6 +6,7 @@ from .types import (
     ParseResult,
     ParsedPage,
     TextItem,
+    WordBox,
     ScreenshotResult,
     ParseError,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "ParseResult",
     "ParsedPage",
     "TextItem",
+    "WordBox",
     "ScreenshotResult",
     "PageComplexityStats",
     "ExtractedImage",

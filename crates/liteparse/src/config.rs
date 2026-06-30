@@ -53,6 +53,13 @@ pub struct LiteParseConfig {
     /// OCR-server load for lower tail latency on a slow/stuck pod. No effect on
     /// the Tesseract engine.
     pub ocr_hedge_delays_ms: Vec<u64>,
+    /// Emit per-word sub-boxes on each `TextItem` (`TextItem.words`). Default
+    /// `false`: a text item already carries its own box, and word boxes roughly
+    /// double the text-item payload (size + napi marshalling), so they are only
+    /// worth computing for callers doing word-level bbox attribution. When
+    /// `false`, `TextItem.words` is always empty and the per-word tracking is
+    /// skipped entirely (zero allocation).
+    pub emit_word_boxes: bool,
 }
 
 /// Image handling for the markdown emitter.
@@ -113,6 +120,7 @@ impl Default for LiteParseConfig {
             extract_links: true,
             ocr_failure_fatal: true,
             ocr_hedge_delays_ms: Vec::new(),
+            emit_word_boxes: false,
         }
     }
 }

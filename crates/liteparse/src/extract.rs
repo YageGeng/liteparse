@@ -2,7 +2,7 @@ use crate::error::LiteParseError;
 use crate::glyph_names::resolve_glyph_name;
 use crate::types::{
     ExtractedImage, GraphicPrimitive, ImageRef, OutlineTarget, Page as LitePage, PdfInput, Rect,
-    StructNode, TextItem,
+    StructNode, TextItem, WordBox,
 };
 use image::ImageEncoder;
 use pdfium::{
@@ -49,7 +49,7 @@ pub(crate) fn extract_pages_from_document(
     target_pages: Option<&[u32]>,
     max_pages: usize,
 ) -> Result<Vec<LitePage>, LiteParseError> {
-    Ok(extract_pages_and_images(document, target_pages, max_pages, false, false, None)?.0)
+    Ok(extract_pages_and_images(document, target_pages, max_pages, false, false, None, false)?.0)
 }
 
 /// Same as `extract_pages_from_document` but optionally also renders every
@@ -64,6 +64,7 @@ pub(crate) fn extract_pages_and_images(
     render_images: bool,
     extract_links: bool,
     glyph_resolver: Option<&dyn crate::GlyphResolver>,
+    emit_word_boxes: bool,
 ) -> Result<(Vec<LitePage>, Vec<ExtractedImage>), LiteParseError> {
     let page_count = document.page_count();
     let mut pages = Vec::new();
@@ -90,7 +91,13 @@ pub(crate) fn extract_pages_and_images(
             right: page.width(),
             bottom: 0.0,
         });
-        let mut text_items = extract_page_text_items(&page, &text_page, &view_box, glyph_resolver)?;
+        let mut text_items = extract_page_text_items(
+            &page,
+            &text_page,
+            &view_box,
+            glyph_resolver,
+            emit_word_boxes,
+        )?;
         if extract_links {
             assign_links(&mut text_items, &page.links(&view_box));
         }
@@ -524,6 +531,7 @@ fn extract_page_text_items(
     text_page: &TextPage,
     view_box: &RectF,
     glyph_resolver: Option<&dyn crate::GlyphResolver>,
+    emit_word_boxes: bool,
 ) -> Result<Vec<TextItem>, LiteParseError> {
     let char_count = text_page.char_count();
     if char_count <= 0 {
@@ -554,7 +562,7 @@ fn extract_page_text_items(
     let page_rotation = page.rotation();
     let vp_xform = page.viewport_transform(view_box);
     let mut items: Vec<TextItem> = Vec::new();
-    let mut seg = SegmentBuilder::new();
+    let mut seg = SegmentBuilder::new(emit_word_boxes);
     let garbage_fonts = detect_garbage_unicode_fonts(text_page, char_count);
     let mut glyph_decoder = GlyphDecoder::new(
         std::env::var("LITEPARSE_DEBUG_GLYPH").is_ok(),
@@ -829,6 +837,7 @@ fn extract_page_text_items(
                 };
                 if both_alnum && thresh > 0.0 && loose_gap > thresh {
                     seg.text.push(' ');
+                    seg.break_word();
                 }
                 seg.push_char(c, &vp_loose, &vp_strict, &ch);
                 seg.append_ligature_tail(ligature_tail);
@@ -1408,10 +1417,22 @@ struct SegmentBuilder {
     stroke_color: Option<String>,
     has_content: bool,
     pending_space: bool,
+    // Per-word sub-boxes, finalized at each inter-word space break. The
+    // currently-open word is accumulated in the `word_*` fields below and
+    // flushed into `words` by `break_word`.
+    words: Vec<WordBox>,
+    cur_word: String,
+    word_left: f32,
+    word_right: f32,
+    word_top: f32,
+    word_bottom: f32,
+    word_has: bool,
+    // When false, per-word tracking is skipped entirely and `words` stays empty.
+    emit_words: bool,
 }
 
 impl SegmentBuilder {
-    fn new() -> Self {
+    fn new(emit_words: bool) -> Self {
         Self {
             text: String::new(),
             vp_left: f32::MAX,
@@ -1440,7 +1461,57 @@ impl SegmentBuilder {
             stroke_color: None,
             has_content: false,
             pending_space: false,
+            words: Vec::new(),
+            cur_word: String::new(),
+            word_left: f32::MAX,
+            word_right: f32::MIN,
+            word_top: f32::MAX,
+            word_bottom: f32::MIN,
+            word_has: false,
+            emit_words,
         }
+    }
+
+    /// Extend the currently-open word with a character's loose box, opening a
+    /// fresh word if none is active. No-op unless word emission is enabled.
+    fn add_word_char(&mut self, c: char, vp_loose: &RectF) {
+        if !self.emit_words {
+            return;
+        }
+        if self.word_has {
+            self.word_left = self.word_left.min(vp_loose.left);
+            self.word_right = self.word_right.max(vp_loose.right);
+            self.word_top = self.word_top.min(vp_loose.top);
+            self.word_bottom = self.word_bottom.max(vp_loose.bottom);
+        } else {
+            self.cur_word.clear();
+            self.word_left = vp_loose.left;
+            self.word_right = vp_loose.right;
+            self.word_top = vp_loose.top;
+            self.word_bottom = vp_loose.bottom;
+            self.word_has = true;
+        }
+        self.cur_word.push(c);
+    }
+
+    /// Finalize the open word (if any) into `words` and reset the accumulator.
+    /// Called at each inter-word space and at segment flush.
+    fn break_word(&mut self) {
+        if !self.word_has {
+            return;
+        }
+        let trimmed = self.cur_word.trim();
+        if !trimmed.is_empty() {
+            self.words.push(WordBox {
+                text: trimmed.to_string(),
+                x: self.word_left,
+                y: self.word_top,
+                width: self.word_right - self.word_left,
+                height: self.word_bottom - self.word_top,
+            });
+        }
+        self.cur_word.clear();
+        self.word_has = false;
     }
 
     /// Average width of non-space characters in the current segment.
@@ -1480,6 +1551,9 @@ impl SegmentBuilder {
         self.unmapped_char_count = if ch.has_unicode_map_error() { 1 } else { 0 };
         self.has_content = true;
         self.pending_space = false;
+        self.words.clear();
+        self.word_has = false;
+        self.add_word_char(c, vp_loose);
         self.text_width = 0.0;
         self.font_is_buggy = false;
         self.font_is_embedded = false;
@@ -1564,6 +1638,7 @@ impl SegmentBuilder {
     /// Add a visible character to the current segment.
     fn push_char(&mut self, c: char, vp_loose: &RectF, vp_strict: &RectF, ch: &pdfium::TextChar) {
         self.text.push(c);
+        self.add_word_char(c, vp_loose);
         self.vp_left = self.vp_left.min(vp_loose.left);
         self.vp_right = self.vp_right.max(vp_loose.right);
         self.vp_top = self.vp_top.min(vp_loose.top);
@@ -1601,6 +1676,9 @@ impl SegmentBuilder {
     /// Does not update bounding boxes or char count.
     fn append_ligature_tail(&mut self, tail: &str) {
         self.text.push_str(tail);
+        if self.word_has {
+            self.cur_word.push_str(tail);
+        }
     }
 
     /// Returns true if the segment contains any characters that aren't dots or spaces.
@@ -1620,6 +1698,7 @@ impl SegmentBuilder {
     /// Commit a pending space into the segment text.
     fn commit_pending_space(&mut self) {
         if self.pending_space {
+            self.break_word();
             self.text.push(' ');
             self.pending_space = false;
         }
@@ -1631,6 +1710,7 @@ impl SegmentBuilder {
             return;
         }
 
+        self.break_word();
         let trimmed = self.text.trim();
         if !trimmed.is_empty() {
             let width = self.vp_right - self.vp_left;
@@ -1669,10 +1749,11 @@ impl SegmentBuilder {
                 confidence: None,
                 link: None,
                 strike: false,
+                words: std::mem::take(&mut self.words),
             });
         }
 
-        *self = Self::new();
+        *self = Self::new(self.emit_words);
     }
 }
 
